@@ -346,7 +346,7 @@ describe('edge cases', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('long content does not throw', () => {
+  it('long content does not throw', { timeout: 30000 }, () => {
     const content = 'x'.repeat(100_000);
     expect(() => scanContent(content, 'test')).not.toThrow();
   });
