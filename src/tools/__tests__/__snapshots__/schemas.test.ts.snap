@@ -1,0 +1,279 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`tool schema contracts > bash tool schema 1`] = `
+{
+  "name": "bash",
+  "parameters": {
+    "properties": {
+      "action": {
+        "description": "Action on a background process: "output" reads recent output, "kill" stops it",
+        "enum": [
+          "output",
+          "kill",
+        ],
+        "type": "string",
+      },
+      "background": {
+        "description": "Run in background. Returns PID immediately. Use for dev servers, watchers, long-running processes.",
+        "type": "boolean",
+      },
+      "command": {
+        "description": "The shell command to execute",
+        "type": "string",
+      },
+      "pid": {
+        "description": "PID of background process (required with action)",
+        "type": "number",
+      },
+    },
+    "required": [],
+    "type": "object",
+  },
+}
+`;
+
+exports[`tool schema contracts > file tool schema 1`] = `
+{
+  "name": "file",
+  "parameters": {
+    "properties": {
+      "action": {
+        "description": "read = view file, list = directory listing, write = create/overwrite file, edit = replace a string in an existing file.",
+        "enum": [
+          "read",
+          "list",
+          "write",
+          "edit",
+        ],
+        "type": "string",
+      },
+      "content": {
+        "description": "File content to write (write action only).",
+        "type": "string",
+      },
+      "depth": {
+        "description": "Directory depth for list (default: 2, max: 3).",
+        "type": "number",
+      },
+      "limit": {
+        "description": "Max lines to return (read only). Omit to read entire file.",
+        "type": "number",
+      },
+      "new_string": {
+        "description": "Replacement string (edit action only).",
+        "type": "string",
+      },
+      "offset": {
+        "description": "Line number to start reading from (read only, default: 1).",
+        "type": "number",
+      },
+      "old_string": {
+        "description": "Exact string to find and replace (edit action only). Must match exactly once.",
+        "type": "string",
+      },
+      "path": {
+        "description": "File or directory path (relative to project root, or absolute).",
+        "type": "string",
+      },
+    },
+    "required": [
+      "action",
+      "path",
+    ],
+    "type": "object",
+  },
+}
+`;
+
+exports[`tool schema contracts > git tool schema 1`] = `
+{
+  "name": "git",
+  "parameters": {
+    "properties": {
+      "action": {
+        "description": "The git operation to perform.",
+        "enum": [
+          "status",
+          "init",
+          "branch",
+          "commit",
+          "push",
+        ],
+        "type": "string",
+      },
+      "files": {
+        "description": "Specific files to stage (for action=commit). Omit to stage all.",
+        "items": {
+          "type": "string",
+        },
+        "type": "array",
+      },
+      "force": {
+        "description": "Force push with lease (for action=push). Default: false.",
+        "type": "boolean",
+      },
+      "message": {
+        "description": "Commit message (for action=commit).",
+        "type": "string",
+      },
+      "name": {
+        "description": "Branch name (for action=branch, e.g. "feature/add-auth").",
+        "type": "string",
+      },
+      "remote": {
+        "description": "Remote URL (for action=init, e.g. "git@github.com:user/repo.git").",
+        "type": "string",
+      },
+    },
+    "required": [
+      "action",
+    ],
+    "type": "object",
+  },
+}
+`;
+
+exports[`tool schema contracts > grep tool schema 1`] = `
+{
+  "name": "grep",
+  "parameters": {
+    "properties": {
+      "action": {
+        "description": "search = content regex, find = file name glob.",
+        "enum": [
+          "search",
+          "find",
+        ],
+        "type": "string",
+      },
+      "case_insensitive": {
+        "description": "Case-insensitive matching (search only). Default: false.",
+        "type": "boolean",
+      },
+      "context": {
+        "description": "Lines of context before and after each match (search only). Default: 0.",
+        "type": "number",
+      },
+      "glob": {
+        "description": "File type filter for action=search (e.g. "*.ts", "*.py"). Not needed for find.",
+        "type": "string",
+      },
+      "path": {
+        "description": "Subdirectory to scope (relative to project root). Omit to search everywhere.",
+        "type": "string",
+      },
+      "pattern": {
+        "description": "Regex for search, glob for find (e.g. "*.ts", "TODO", "function\\s+\\w+").",
+        "type": "string",
+      },
+    },
+    "required": [
+      "action",
+      "pattern",
+    ],
+    "type": "object",
+  },
+}
+`;
+
+exports[`tool schema contracts > memory tool schema 1`] = `
+{
+  "name": "memory",
+  "parameters": {
+    "properties": {
+      "action": {
+        "description": "The memory operation to perform.",
+        "enum": [
+          "save",
+        ],
+        "type": "string",
+      },
+      "content": {
+        "description": "The fact, decision, or pattern to remember.",
+        "type": "string",
+      },
+      "tier": {
+        "description": ""global" for preferences, coding style, patterns that apply everywhere. "project" for architecture decisions, current ticket, PR templates, gotchas specific to this codebase.",
+        "enum": [
+          "global",
+          "project",
+        ],
+        "type": "string",
+      },
+    },
+    "required": [
+      "action",
+      "tier",
+      "content",
+    ],
+    "type": "object",
+  },
+}
+`;
+
+exports[`tool schema contracts > plan tool schema 1`] = `
+{
+  "name": "plan",
+  "parameters": {
+    "properties": {
+      "action": {
+        "description": ""save" to create a new plan, "append" to add content to the latest plan, "switch" to activate a different plan by name, "list" to see all plans, "read" to view a specific plan.",
+        "enum": [
+          "save",
+          "list",
+          "read",
+          "append",
+          "switch",
+        ],
+        "type": "string",
+      },
+      "content": {
+        "description": "Plan content (required for action=save).",
+        "type": "string",
+      },
+      "name": {
+        "description": "Plan name for save (e.g. "refactor-cli") or read (e.g. "2026-04-13T12-31-22-refactor-cli").",
+        "type": "string",
+      },
+    },
+    "required": [
+      "action",
+    ],
+    "type": "object",
+  },
+}
+`;
+
+exports[`tool schema contracts > web tool schema 1`] = `
+{
+  "name": "web",
+  "parameters": {
+    "properties": {
+      "action": {
+        "description": "The web operation to perform.",
+        "enum": [
+          "fetch",
+          "search",
+        ],
+        "type": "string",
+      },
+      "query": {
+        "description": "Search query (for action=search).",
+        "type": "string",
+      },
+      "raw": {
+        "description": "If true, use native fetch + HTML stripping instead of Jina Reader (for action=fetch). Default: false.",
+        "type": "boolean",
+      },
+      "url": {
+        "description": "URL to fetch (for action=fetch).",
+        "type": "string",
+      },
+    },
+    "required": [
+      "action",
+    ],
+    "type": "object",
+  },
+}
+`;

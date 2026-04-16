@@ -1,0 +1,128 @@
+// ── Content block types (multimodal support) ────────────────────────────────
+
+export interface TextBlock {
+  type: 'text';
+  text: string;
+}
+
+/** OpenRouter-native image format — works across Claude, GPT-4o, Gemini, etc. */
+export interface ImageUrlBlock {
+  type: 'image_url';
+  image_url: { url: string };
+}
+
+/** OpenRouter-native file format — auto-parsed for non-native models */
+export interface FileBlock {
+  type: 'file';
+  file: { filename: string; file_data: string };
+}
+
+/** Lightweight pointer stored in messages instead of full content data */
+export interface ContentRef {
+  type: 'content_ref';
+  id: number;
+  hash: string;
+  media_type: string;
+  filename?: string;
+  width?: number;
+  height?: number;
+  page_count?: number;
+  size_bytes: number;
+  cache_path: string;
+  introduced_turn: number;
+}
+
+export type ContentBlock = TextBlock | ImageUrlBlock | FileBlock | ContentRef;
+
+// ── Message ─────────────────────────────────────────────────────────────────
+
+export interface Message {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | ContentBlock[] | null;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+}
+
+export interface ToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
+/** Declares which tool args map to permission pattern qualifier/value for custom tools */
+export interface PermissionKey {
+  /** Arg name whose value becomes the pattern qualifier (e.g. "target" → deploy(staging)) */
+  qualifier: string;
+  /** Arg name whose value is matched by the glob portion (optional) */
+  value?: string;
+}
+
+export interface Tool {
+  type: 'function';
+  function: ToolDefinition;
+  permissionKey?: PermissionKey;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tools destructure their own typed params from parsed JSON
+  execute: (args: any) => Promise<string> | string;
+}
+
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: { type: 'object'; properties: Record<string, unknown>; required: string[] };
+}
+
+/** Return 'allow' to proceed, 'deny' to skip the tool call */
+export type ConfirmToolCall = (toolName: string, args: Record<string, unknown>, permissionKey?: PermissionKey) => Promise<'allow' | 'deny'>;
+
+export interface ToolLoadFailure {
+  file: string;
+  name?: string;
+  reason: string;
+}
+
+export interface AgentConfig {
+  apiKey?: string;
+  model?: string;
+  baseURL?: string;
+  systemPrompt?: string;
+  systemPromptSuffix?: string;
+  maxIterations?: number;
+  cwd?: string;
+  extraTools?: Tool[];
+  toolFailures?: ToolLoadFailure[];
+  stream?: boolean;
+  confirmToolCall?: ConfirmToolCall;
+  noHistory?: boolean;
+  noSubAgents?: boolean;
+  silent?: boolean;
+}
+
+export interface StreamChunk {
+  type: 'thinking' | 'text' | 'tool_start' | 'tool_end' | 'done' | 'max_iterations' | 'interrupted' | 'steer';
+  content?: string;
+  toolName?: string;
+  toolCallId?: string;
+  success?: boolean;
+}
+
+export interface Usage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
+}
+
+export interface CLIOptions {
+  model?: string;
+  key?: string;
+  system?: string;
+  baseURL?: string;
+  maxIterations?: number;
+  help?: boolean;
+  stats?: boolean;
+  yes?: boolean;
+  contentPaths?: string[];
+}
