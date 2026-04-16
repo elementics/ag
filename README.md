@@ -547,7 +547,7 @@ src/
   tools/skill.ts      # skill activation tool
 ```
 
-Zero npm dependencies. Node.js 18+ and TypeScript.
+Zero npm dependencies. Node.js 20+ and TypeScript.
 
 ## License
 
