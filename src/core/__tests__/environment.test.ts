@@ -62,6 +62,20 @@ describe('getEnvironmentContext', () => {
     }
   });
 
+  it('handles git repo with no commits gracefully', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'ag-env-test-'));
+    try {
+      execFileSync('git', ['init'], { cwd: tmp });
+      const result = getEnvironmentContext(tmp);
+      expect(result).toContain('# Environment');
+      expect(result).not.toContain('Git branch');
+      // Should not contain any git error output
+      expect(result).not.toContain('fatal');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('handles non-git directory gracefully', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'ag-env-test-'));
     try {

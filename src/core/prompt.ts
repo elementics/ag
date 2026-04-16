@@ -19,9 +19,9 @@ export function getEnvironmentContext(cwd: string): string {
   // Git info
   if (existsSync(join(cwd, '.git'))) {
     try {
-      const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf-8', timeout: 3000 }).trim();
+      const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
       lines.push(`Git branch: ${branch}`);
-      const dirty = execFileSync('git', ['status', '--porcelain'], { cwd, encoding: 'utf-8', timeout: 3000 }).trim();
+      const dirty = execFileSync('git', ['status', '--porcelain'], { cwd, encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
       if (dirty) {
         const count = dirty.split('\n').length;
         lines.push(`Git status: ${count} changed file(s)`);
