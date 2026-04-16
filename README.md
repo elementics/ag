@@ -98,6 +98,16 @@ All commands follow the pattern: `/noun` to show, `/noun subcommand` to act.
 /skill search [query]       Search skills.sh registry
 /skill add <source>         Install skill from registry
 /skill remove <name>        Uninstall a skill
+/content add <path>         Add image/PDF as [content #N]
+/content list               List content refs in session
+/content paste              Paste image from clipboard
+/content screenshot         Capture screen region
+/content clear              Clear all content refs
+/permissions                Show permission rules
+/permissions allow <p>      Add allow rule (session)
+/permissions deny <p>       Add deny rule (session)
+/permissions save           Save session rules to project
+/permissions clear          Clear session rules
 /exit                       Exit
 ```
 
@@ -114,6 +124,7 @@ All action-based tools follow the pattern: `tool(action, ...params)`.
 | `git` | `status`, `init`, `branch`, `commit`, `push` | Git workflow |
 | `grep` | `search`, `find` | Search file contents (regex), find files by glob |
 | `web` | `fetch`, `search` | Fetch web pages, search for current info |
+| `content` | `add`, `list`, `paste`, `screenshot`, `clear` | Attach images/PDFs to messages |
 | `task` | `create`, `list`, `update`, `read`, `remove`, `clear` | Track tasks for multi-step work |
 | `agent` | — | Spawn sub-agents for parallel work |
 | `skill` | — | Activate a skill by name |
@@ -365,7 +376,7 @@ Three tiers, all plain markdown you can edit directly:
       history.jsonl                 # conversation history (created on demand)
 ```
 
-All memory is injected into the system prompt on every API call (capped at ~6000 chars total to avoid context bloat). The agent reads it automatically and writes via the `memory` and `plan` tools.
+All memory is injected into the system prompt on every API call (capped at ~4000 chars per section to avoid context bloat). The agent reads it automatically and writes via the `memory` and `plan` tools.
 
 ### Git workflow with memory
 
@@ -441,7 +452,7 @@ Deny rules always override allow rules. Use `/permissions` to manage rules inter
 
 ### Built-in Classifications
 
-**Always allowed (no prompt):** `file(read)`, `file(list)`, `grep(*)`, `memory(*)`, `plan(*)`, `skill(*)`, `git(status)`, `web(search)`
+**Always allowed (no prompt):** `file(read)`, `file(list)`, `grep(*)`, `memory(*)`, `plan(*)`, `skill(*)`, `git(status)`, `web(search)`, `task(*)`, `agent(*)`, `content(*)`
 
 **Prompted:** `bash`, `file(write)`, `file(edit)`, `git(commit/push/branch)`, `web(fetch)`
 
@@ -551,4 +562,4 @@ Zero npm dependencies. Node.js 20+ and TypeScript.
 
 ## License
 
-MIT
+Apache 2.0 — see [LICENSE](LICENSE)
