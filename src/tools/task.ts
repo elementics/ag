@@ -114,7 +114,6 @@ export function taskTool(cwd: string): Tool {
 
         case 'clear': {
           return withTasks(cwd, tasks => {
-            const before = tasks.length;
             const done = tasks.filter(t => t.status === 'done');
             // Remove done tasks in-place (withTasks saves the mutated array)
             for (const d of done) tasks.splice(tasks.indexOf(d), 1);

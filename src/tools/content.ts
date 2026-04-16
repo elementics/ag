@@ -42,7 +42,7 @@ function doInfo(ref?: number): string {
   ].filter(Boolean).join('\n');
 }
 
-export function contentTool(cwd: string): Tool {
+export function contentTool(_cwd: string): Tool {
   return {
     type: 'function',
     function: {

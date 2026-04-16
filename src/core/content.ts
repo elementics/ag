@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSy
 import { join, extname, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { AG_DIR } from './constants.js';
-import type { Message, ContentRef, ContentBlock, TextBlock, ImageUrlBlock, FileBlock } from './types.js';
+import type { Message, ContentRef, TextBlock, ImageUrlBlock, FileBlock } from './types.js';
 
 // ── Project-scoped content cache dir ────────────────────────────────────────
 
