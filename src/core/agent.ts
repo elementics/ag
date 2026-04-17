@@ -1,8 +1,8 @@
-import { Message, Tool, AgentConfig, StreamChunk, ConfirmToolCall, ContentBlock, ContentRef } from './types.js';
+import { Message, Tool, AgentConfig, StreamChunk, ConfirmToolCall, ContentBlock, ContentRef, ResultRef } from './types.js';
 import { AgentEventEmitter, type EventName, type EventHandler } from './events.js';
 import { discoverExtensions, loadExtensions, type ExtensionMeta } from './extensions.js';
 import { C } from './colors.js';
-import { loadContext, loadHistory, appendHistory, getStats, clearProject, clearAll, paths, saveGlobalMemory, saveProjectMemory, savePlan, appendPlan, setActivePlan, getActivePlanName, loadGlobalMemory, loadProjectMemory, loadPlan, loadPlanByName, listPlans, cleanupTasks, type MemoryStats } from '../memory/memory.js';
+import { loadContext, loadHistory, appendHistory, rewriteHistory, getStats, clearProject, clearAll, paths, saveGlobalMemory, saveProjectMemory, savePlan, appendPlan, setActivePlan, getActivePlanName, loadGlobalMemory, loadProjectMemory, loadPlan, loadPlanByName, listPlans, cleanupTasks, saveSessionState, loadSessionState, type MemoryStats, type SessionState } from '../memory/memory.js';
 import { bashToolFactory } from '../tools/bash.js';
 import { memoryTool } from '../tools/memory.js';
 import { planTool } from '../tools/plan.js';
@@ -14,12 +14,17 @@ import { agentTool } from '../tools/agent.js';
 import { grepTool } from '../tools/grep.js';
 import { fileTool } from '../tools/file.js';
 import { contentTool } from '../tools/content.js';
+import { resultTool } from '../tools/result.js';
+import { historyTool } from '../tools/history.js';
 import { consumeRequestedRefs, resolveContent, getContentRef, restoreContentIndex, pruneContentCache, estimateMessageContentChars } from './content.js';
+import { cacheResult, RESULT_REF_THRESHOLD, consumeRequestedResults, resolveResult, getResultRef, restoreResultIndex, saveResultIndex } from './results.js';
 import { discoverSkills, buildSkillCatalog, getAlwaysOnContent, loadSkillTools, type SkillMeta } from './skills.js';
 import { ContextTracker } from './context.js';
 import { startSpinner, fetchWithRetry, truncateToolResult, raceAll } from './utils.js';
 import { getEnvironmentContext, isReadOnlyToolCall, getProjectListing, buildRequestBody } from './prompt.js';
 import { compactMessages, COMPACT_THRESHOLD, COMPACT_HEAD_KEEP, COMPACT_TAIL_KEEP } from './compaction.js';
+import { summarizeTurn, extractFileOps, TURN_SUMMARY_THRESHOLD, type TurnSummary } from './summarization.js';
+import { CheckpointStore } from './checkpoint.js';
 
 export const MAX_ITERATIONS_REACHED = '[Max iterations reached]';
 
@@ -57,6 +62,10 @@ export class Agent implements SkillHost {
   private readonly noHistory: boolean;
   private steerQueue: string[] = [];
   private currentTurn = 0;
+  private turnSummaries = new Map<number, import('./summarization.js').TurnSummary>();
+  private turnMessageStartIndex = 0;
+  private checkpointStore: CheckpointStore | null = null;
+  private currentCheckpointId: string | null = null;
 
   constructor(config: AgentConfig = {}) {
     this.model = config.model || 'anthropic/claude-sonnet-4.6';
@@ -97,9 +106,9 @@ export class Agent implements SkillHost {
 - Never commit files that contain secrets (.env, credentials, keys).
 
 # History
-- Your conversation history is stored at the path shown in <history-file>. Each line is JSON with a "ts" timestamp field.
-- When the user asks about past conversations, ALWAYS search it with grep(action=search, path="<the history-file path>", pattern="<search term>"). Pass the exact file path — do not search broadly or omit the path.
-- Use the "ts" field to answer time-based questions (e.g., "what did we discuss last Tuesday?").
+- When the user asks about past conversations or work and you cannot answer from your current context, use history(action=search, query="<keyword>") to search conversation history. This searches user messages, assistant responses, tool calls, file paths, and result summaries.
+- Use history(action=recent) to see the last few conversation entries for broader context.
+- This is a last resort — try answering from your current context and memory first.
 
 # Output
 - Be concise. Short responses, no filler, no trailing summaries of what you just did.
@@ -143,6 +152,8 @@ export class Agent implements SkillHost {
     this.addTool(webTool());
     this.addTool(taskTool(this.cwd));
     this.addTool(contentTool(this.cwd));
+    this.addTool(resultTool(this.cwd));
+    this.addTool(historyTool(this.cwd));
     if (!config.noSubAgents) this.addTool(agentTool(this));
     if (this.allSkills.length > 0) this.addTool(skillTool(this));
     this.builtinToolNames = new Set(this.tools.keys());
@@ -158,10 +169,22 @@ export class Agent implements SkillHost {
 
     // Load recent conversation history for continuity (sub-agents start clean)
     if (!config.noHistory) {
-      this.messages = loadHistory(this.cwd);
+      // Try session state resume first (structured summary), fall back to raw history
+      const sessionState = loadSessionState(this.cwd);
+      if (sessionState) {
+        this.messages = [{
+          role: 'user',
+          content: `Resuming previous session. Here's where things stand:\n\n${sessionState.summary}\n\nRecent files read: ${sessionState.recentFileOps.read.join(', ') || 'none'}\nRecent files modified: ${sessionState.recentFileOps.modified.join(', ') || 'none'}${sessionState.activePlan ? `\nActive plan: ${sessionState.activePlan}` : ''}`,
+        }];
+        this.currentTurn = sessionState.turnNumber;
+      } else {
+        this.messages = loadHistory(this.cwd);
+      }
       restoreContentIndex(this.cwd, this.messages);
+      restoreResultIndex(this.cwd);
       pruneContentCache(this.cwd);
       cleanupTasks(this.cwd);
+      this.checkpointStore = new CheckpointStore(paths(this.cwd).projectDir);
     }
   }
 
@@ -231,14 +254,64 @@ export class Agent implements SkillHost {
   }
 
   private getRequestBody(stream: boolean, overrides?: { messages?: Message[]; systemPrompt?: string }): Record<string, unknown> {
+    let messages = overrides?.messages ?? this.messages;
+    // Collapse older turns that have summaries
+    if (this.turnSummaries.size > 0) {
+      messages = this.collapseOlderTurns(messages);
+    }
     return buildRequestBody({
       model: this.model,
       systemPrompt: overrides?.systemPrompt ?? this.systemPrompt,
-      messages: overrides?.messages ?? this.messages,
+      messages,
       tools: Array.from(this.tools.values()).map(t => ({ type: t.type, function: t.function })),
       stream,
       currentTurn: this.currentTurn,
     });
+  }
+
+  /** Replace older turn message sequences with their summaries */
+  private collapseOlderTurns(messages: Message[]): Message[] {
+    const result: Message[] = [];
+    let i = 0;
+    while (i < messages.length) {
+      const turn = messages[i]._turn;
+      if (turn != null && turn !== this.currentTurn && this.turnSummaries.has(turn)) {
+        // Skip all messages from this turn, inject summary once
+        const summary = this.turnSummaries.get(turn)!;
+        result.push({
+          role: 'user',
+          content: `[Turn ${turn} summary — ${summary.toolCallCount} tool calls collapsed]\n\n${summary.summary}`,
+        });
+        while (i < messages.length && messages[i]._turn === turn) i++;
+      } else {
+        result.push(messages[i]);
+        i++;
+      }
+    }
+    return result;
+  }
+
+  /** Save current session state to disk for resume on next startup */
+  private saveSessionState(): void {
+    if (this.noHistory) return;
+    // Aggregate recent turn summaries for the summary text
+    const recentSummaries = [...this.turnSummaries.values()].slice(-5);
+    const summary = recentSummaries.length > 0
+      ? recentSummaries.map(s => s.summary).join('\n\n---\n\n')
+      : this.messages
+          .filter(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 0)
+          .slice(-3)
+          .map(m => (m.content as string).slice(0, 500))
+          .join('\n\n');
+    // Always extract file ops from messages directly (not just from turn summaries)
+    const fileOps = extractFileOps(this.messages);
+    saveSessionState({
+      timestamp: new Date().toISOString(),
+      turnNumber: this.currentTurn,
+      summary: summary || 'No activity to summarize.',
+      recentFileOps: fileOps,
+      activePlan: getActivePlanName(this.cwd),
+    }, this.cwd);
   }
 
   async activateSkill(name: string): Promise<string> {
@@ -333,6 +406,7 @@ export class Agent implements SkillHost {
     }
 
     this.currentTurn++;
+    this.turnMessageStartIndex = this.messages.length; // Mark where this turn's messages begin
 
     // Set introduced_turn on any content refs
     if (Array.isArray(content)) {
@@ -343,12 +417,23 @@ export class Agent implements SkillHost {
       }
     }
 
-    const userMessage: Message = { role: 'user', content };
+    const userMessage: Message = { role: 'user', content, _turn: this.currentTurn };
     this.messages.push(userMessage);
     this.appendToHistory(userMessage);
 
     if (this.messages.length > MAX_MESSAGES) {
       this.messages = this.messages.slice(-MAX_MESSAGES);
+    }
+
+    let turnToolCallCount = 0;
+
+    // ── Auto-checkpoint at turn start (skip first turn — nothing to rewind to) ──
+    if (this.checkpointStore && this.currentTurn > 1) {
+      const cp = this.checkpointStore.create(this.messages.length - 1, this.currentTurn);
+      this.currentCheckpointId = cp.id;
+      await this.events.emit('checkpoint_create', {
+        id: cp.id, label: cp.label, messageIndex: cp.messageIndex, turnNumber: cp.turnNumber,
+      });
     }
 
     for (let i = 0; i < this.maxIterations; i++) {
@@ -505,7 +590,7 @@ export class Agent implements SkillHost {
       if (usage) this.contextTracker.update(usage);
 
       // Build assistant message
-      const msg: Message = { role: 'assistant', content: assistantContent || null };
+      const msg: Message = { role: 'assistant', content: assistantContent || null, _turn: this.currentTurn };
       if (toolCalls.size > 0) {
         msg.tool_calls = Array.from(toolCalls.values()).map(tc => ({
           id: tc.id,
@@ -523,6 +608,20 @@ export class Agent implements SkillHost {
       if (!msg.tool_calls?.length) {
         // ── turn_end event (no tools) ──
         await this.events.emit('turn_end', { iteration: i, hadToolCalls: false, toolCallCount: 0 });
+
+        // ── turn summarization (for turns with enough tool calls) ──
+        if (turnToolCallCount >= TURN_SUMMARY_THRESHOLD && !this.silent) {
+          const turnMsgs = this.messages.slice(this.turnMessageStartIndex);
+          summarizeTurn(turnMsgs, this.currentTurn, {
+            baseURL: this.baseURL, apiKey: this.apiKey, model: this.model,
+          }, this.turnMessageStartIndex, true).then(summary => {
+            this.turnSummaries.set(this.currentTurn, summary);
+            this.saveSessionState();
+          }).catch(() => { /* summary failure is non-fatal */ });
+        } else if (!this.silent) {
+          this.saveSessionState();
+        }
+
         const doneText = typeof msg.content === 'string' ? msg.content
           : Array.isArray(msg.content) ? msg.content.filter((b): b is import('./types.js').TextBlock => b.type === 'text').map(b => b.text).join('')
           : '';
@@ -558,6 +657,17 @@ export class Agent implements SkillHost {
         catch { permissionDecisions.set(call.id, 'deny'); continue; }
         if (this.confirmToolCall && !isReadOnlyToolCall(call.function.name, args)) {
           permissionDecisions.set(call.id, await this.confirmToolCall(call.function.name, args, tool.permissionKey));
+        }
+      }
+
+      // ── Checkpoint file backups before write tools execute ──
+      if (this.checkpointStore && this.currentCheckpointId) {
+        for (const call of msg.tool_calls) {
+          if (!isReadOnlyToolCall(call.function.name, (() => { try { return JSON.parse(call.function.arguments || '{}'); } catch { return {}; } })())) {
+            const args = (() => { try { return JSON.parse(call.function.arguments || '{}'); } catch { return {}; } })();
+            const filePath = (args.path || args.file_path) as string | undefined;
+            if (filePath) this.checkpointStore.backupFile(this.currentCheckpointId, filePath);
+          }
         }
       }
 
@@ -604,21 +714,41 @@ export class Agent implements SkillHost {
       for await (const r of raceAll(execPromises)) {
         completedCallIds.add(r.call.id);
 
-        // If a content(get) tool was called, inject the actual content block into the tool result
+        // If a content(get) or result(get) tool was called, inject the actual content
         let toolContent: string | ContentBlock[] = r.content;
-        const requested = consumeRequestedRefs();
-        if (requested.size > 0) {
+        const requestedContent = consumeRequestedRefs();
+        const requestedResults = consumeRequestedResults();
+        if (requestedContent.size > 0 || requestedResults.size > 0) {
           const blocks: ContentBlock[] = [{ type: 'text', text: r.content }];
-          for (const refId of requested) {
+          for (const refId of requestedContent) {
             const ref = getContentRef(refId);
             if (ref) {
               try { blocks.push(resolveContent(ref)); } catch { /* cache miss — skip */ }
             }
           }
+          for (const refId of requestedResults) {
+            const ref = getResultRef(refId);
+            if (ref) {
+              const full = resolveResult(ref);
+              if (!full.startsWith('Error:')) blocks.push({ type: 'text', text: full });
+            }
+          }
           if (blocks.length > 1) toolContent = blocks;
         }
 
-        this.messages.push({ role: 'tool', tool_call_id: r.call.id, content: toolContent });
+        // Cache large tool results as ResultRefs (send-once pattern)
+        if (typeof toolContent === 'string' && !r.isError && toolContent.length > RESULT_REF_THRESHOLD) {
+          let args: Record<string, unknown> | undefined;
+          try { args = JSON.parse(r.call.function.arguments || '{}'); } catch { /* ignore */ }
+          const resultRef = cacheResult(r.call.function.name, toolContent, this.currentTurn, this.cwd, args);
+          // On introduction turn: send full content + ref metadata
+          toolContent = [
+            { type: 'text', text: toolContent },
+            resultRef,
+          ];
+        }
+
+        this.messages.push({ role: 'tool', tool_call_id: r.call.id, content: toolContent, _turn: this.currentTurn });
         this.appendToHistory({ role: 'tool', tool_call_id: r.call.id, content: toolContent });
         yield { type: 'tool_end', toolName: r.call.function.name, toolCallId: r.call.id, content: r.content, success: !r.isError };
 
@@ -629,6 +759,7 @@ export class Agent implements SkillHost {
       // Re-estimate context so shouldCompact() reflects tool result sizes
       if (!signal?.aborted) {
         this.contextTracker.estimateFromChars(this.getTotalContextChars());
+        saveResultIndex(this.cwd);
       }
 
       // Fill placeholders for any tool calls that didn't complete (API requires all tool_call_ids)
@@ -646,6 +777,7 @@ export class Agent implements SkillHost {
       }
 
       // ── turn_end event ──
+      turnToolCallCount += msg.tool_calls.length;
       await this.events.emit('turn_end', { iteration: i, hadToolCalls: true, toolCallCount: msg.tool_calls.length });
     }
     yield { type: 'max_iterations' };
@@ -775,14 +907,33 @@ export class Agent implements SkillHost {
   activatePlan(name: string): void { setActivePlan(name, this.cwd); }
   getActivePlanName(): string | null { return getActivePlanName(this.cwd); }
 
-  clearProject(): void { this.messages = []; this.contextTracker.reset(); clearProject(this.cwd); }
-  clearAll(): void { this.messages = []; this.contextTracker.reset(); clearAll(this.cwd); }
+  clearProject(): void { this.messages = []; this.contextTracker.reset(); this.checkpointStore?.clear(); this.turnSummaries.clear(); clearProject(this.cwd); }
+  clearAll(): void { this.messages = []; this.contextTracker.reset(); this.checkpointStore?.clear(); this.turnSummaries.clear(); clearAll(this.cwd); }
 
   // ── Context tracking ───────────────────────────────────────────────────
   getContextUsage(): string { return this.contextTracker.format(); }
   getContextDetails(): string { return this.contextTracker.formatDetailed(); }
   getContextTracker(): ContextTracker { return this.contextTracker; }
   getSystemPromptSize(): number { return this.systemPrompt.length; }
+  getMessages(): Message[] { return [...this.messages]; }
+  getTurnSummaries(): Map<number, TurnSummary> { return new Map(this.turnSummaries); }
+  getCheckpointStore(): CheckpointStore | null { return this.checkpointStore; }
+  getEvents(): AgentEventEmitter { return this.events; }
+
+  /** Truncate conversation to a specific message index (for rewind) */
+  truncateMessages(toIndex: number): void {
+    this.messages = this.messages.slice(0, toIndex);
+    // Rewrite history to match the rewound state
+    if (!this.noHistory) rewriteHistory(this.messages, this.cwd);
+  }
+
+  /** Inject a summary message after rewind */
+  injectSummary(summary: string): void {
+    this.messages.push({
+      role: 'user',
+      content: `[Rewound — summary of subsequent work]\n\n${summary}`,
+    });
+  }
   /** Total estimated chars across all context components (system prompt + tools + messages) */
   getTotalContextChars(): number {
     return this.getContextBreakdown().reduce((sum, p) => sum + p.chars, 0);

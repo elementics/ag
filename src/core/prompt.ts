@@ -64,6 +64,8 @@ const READ_ONLY_CALLS: Record<string, Set<string> | true> = {
   task: true,                                          // all task actions are safe (internal state)
   agent: true,                                         // sub-agent spawning is safe (internal orchestration)
   content: true,                                        // all content actions are read-only
+  result: true,                                         // all result actions are read-only
+  history: true,                                        // all history actions are read-only
 };
 
 export function isReadOnlyToolCall(toolName: string, args: Record<string, unknown>): boolean {

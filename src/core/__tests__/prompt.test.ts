@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { isReadOnlyToolCall, buildRequestBody } from '../prompt.js';
 import { resetContentStore, ingestContent } from '../content.js';
-import type { Message, ContentRef, ContentBlock, TextBlock, ImageUrlBlock } from '../types.js';
+import type { Message, ContentRef, ResultRef, ContentBlock, TextBlock, ImageUrlBlock } from '../types.js';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -108,5 +108,126 @@ describe('buildRequestBody with content', () => {
     const msgs = body.messages as Array<{ role: string; content: unknown }>;
     expect(msgs[1].content).toBe('hello');
     expect(msgs[2].content).toBe('hi');
+  });
+
+  it('keeps full text for result refs on introduction turn', () => {
+    const ref: ResultRef = {
+      type: 'result_ref', id: 1, tool_name: 'file',
+      summary: 'Read /src/foo.ts — 50 lines (ts)',
+      size_chars: 3000, cache_path: '/tmp/r1.txt', introduced_turn: 3,
+    };
+    const messages: Message[] = [
+      { role: 'tool', tool_call_id: 'tc1', content: [
+        { type: 'text', text: 'full file content here...' },
+        ref,
+      ] },
+    ];
+
+    const body = buildRequestBody({ ...baseOptions, messages, currentTurn: 3 });
+    const msgs = body.messages as Array<{ role: string; content: unknown }>;
+    const toolMsg = msgs[1];
+    const blocks = toolMsg.content as ContentBlock[];
+    // On introduction turn: full text kept, ResultRef dropped
+    expect(blocks.length).toBe(1);
+    expect(blocks[0].type).toBe('text');
+    expect((blocks[0] as TextBlock).text).toBe('full file content here...');
+  });
+
+  it('collapses result refs to summary on later turns', () => {
+    const ref: ResultRef = {
+      type: 'result_ref', id: 2, tool_name: 'bash',
+      summary: 'npm test — 12 passed',
+      size_chars: 5000, cache_path: '/tmp/r2.txt', introduced_turn: 1,
+    };
+    const messages: Message[] = [
+      { role: 'tool', tool_call_id: 'tc2', content: [
+        { type: 'text', text: 'very long test output...' },
+        ref,
+      ] },
+    ];
+
+    const body = buildRequestBody({ ...baseOptions, messages, currentTurn: 5 });
+    const msgs = body.messages as Array<{ role: string; content: unknown }>;
+    const toolMsg = msgs[1];
+    const blocks = toolMsg.content as ContentBlock[];
+    // On later turn: full text dropped, summary shown
+    expect(blocks.length).toBe(1);
+    expect(blocks[0].type).toBe('text');
+    expect((blocks[0] as TextBlock).text).toContain('result #2');
+    expect((blocks[0] as TextBlock).text).toContain('npm test');
+    expect((blocks[0] as TextBlock).text).toContain('result(action=get');
+    // Full content should NOT be present
+    expect((blocks[0] as TextBlock).text).not.toContain('very long test output');
+  });
+
+  it('collapses large tool call arguments on older turns', () => {
+    const largeContent = 'x'.repeat(5000);
+    const messages: Message[] = [
+      // Older turn — assistant with large write args
+      { role: 'assistant', content: null, tool_calls: [{
+        id: 'tc1', type: 'function',
+        function: { name: 'file', arguments: JSON.stringify({ action: 'write', path: '/big.html', content: largeContent }) },
+      }] },
+      { role: 'tool', tool_call_id: 'tc1', content: 'Wrote /big.html' },
+      // Current turn — assistant with tool calls (this is the last one, should NOT be collapsed)
+      { role: 'assistant', content: null, tool_calls: [{
+        id: 'tc2', type: 'function',
+        function: { name: 'file', arguments: JSON.stringify({ action: 'read', path: '/small.ts' }) },
+      }] },
+    ];
+
+    const body = buildRequestBody({ ...baseOptions, messages, currentTurn: 5 });
+    const msgs = body.messages as Array<{ role: string; content: unknown; tool_calls?: Array<{ function: { arguments: string } }> }>;
+    // First assistant (older turn) — arguments should be collapsed
+    const olderAssistant = msgs[1];
+    const collapsedArgs = JSON.parse(olderAssistant.tool_calls![0].function.arguments);
+    expect(collapsedArgs._collapsed).toBe(true);
+    expect(collapsedArgs._summary).toContain('write');
+    expect(collapsedArgs._summary).toContain('/big.html');
+    expect(collapsedArgs._summary).toContain('5000 chars');
+    expect(collapsedArgs.action).toBe('write');
+    expect(collapsedArgs.path).toBe('/big.html');
+    // Should NOT contain the full content
+    expect(collapsedArgs.content).toBeUndefined();
+  });
+
+  it('keeps arguments on the most recent tool-calling turn', () => {
+    const largeContent = 'x'.repeat(5000);
+    const messages: Message[] = [
+      // This is the ONLY/LAST assistant with tool_calls — should NOT be collapsed
+      { role: 'assistant', content: null, tool_calls: [{
+        id: 'tc1', type: 'function',
+        function: { name: 'file', arguments: JSON.stringify({ action: 'write', path: '/big.html', content: largeContent }) },
+      }] },
+    ];
+
+    const body = buildRequestBody({ ...baseOptions, messages, currentTurn: 1 });
+    const msgs = body.messages as Array<{ role: string; tool_calls?: Array<{ function: { arguments: string } }> }>;
+    const assistant = msgs[1];
+    const args = JSON.parse(assistant.tool_calls![0].function.arguments);
+    // Should still have the full content — it's the most recent turn
+    expect(args.content).toBe(largeContent);
+    expect(args._collapsed).toBeUndefined();
+  });
+
+  it('preserves small arguments unchanged', () => {
+    const messages: Message[] = [
+      { role: 'assistant', content: null, tool_calls: [{
+        id: 'tc1', type: 'function',
+        function: { name: 'bash', arguments: '{"command":"ls -la"}' },
+      }] },
+      { role: 'tool', tool_call_id: 'tc1', content: 'file list' },
+      { role: 'assistant', content: null, tool_calls: [{
+        id: 'tc2', type: 'function',
+        function: { name: 'bash', arguments: '{"command":"echo hi"}' },
+      }] },
+    ];
+
+    const body = buildRequestBody({ ...baseOptions, messages, currentTurn: 5 });
+    const msgs = body.messages as Array<{ role: string; tool_calls?: Array<{ function: { arguments: string } }> }>;
+    // First assistant (older turn) — small args, should be preserved as-is
+    const args = JSON.parse(msgs[1].tool_calls![0].function.arguments);
+    expect(args.command).toBe('ls -la');
+    expect(args._collapsed).toBeUndefined();
   });
 });

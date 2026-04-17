@@ -1,9 +1,10 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync, rmdirSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync, rmdirSync, rmSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Message } from '../core/types.js';
 import { AG_DIR } from '../core/constants.js';
 import { stripResolvedBlocks, clearContentCache, getAllContentRefs } from '../core/content.js';
+import { clearResultCache, getAllResultRefs } from '../core/results.js';
 
 function projectId(cwd: string): string {
   return createHash('md5').update(cwd).digest('hex').slice(0, 12);
@@ -32,6 +33,8 @@ export function paths(cwd: string = process.cwd()) {
     history: join(proj, 'history.jsonl'),
     tasks: join(proj, 'tasks.json'),
     contentDir: join(proj, 'content'),
+    resultsDir: join(proj, 'results'),
+    sessionState: join(proj, 'session-state.json'),
     projectDir: proj,
   };
 }
@@ -361,6 +364,45 @@ export function appendHistory(message: Message, cwd?: string): void {
   }
 }
 
+/** Rewrite history.jsonl with the given messages (used after rewind) */
+export function rewriteHistory(messages: Message[], cwd?: string): void {
+  const p = paths(cwd).history;
+  const lines = messages.map(msg => {
+    const cleaned = stripResolvedBlocks(msg);
+    return JSON.stringify({ ...cleaned, ts: new Date().toISOString() });
+  });
+  writeFileSync(p, lines.join('\n') + '\n');
+}
+
+// ── Session state ──────────────────────────────────────────────────────────
+
+export interface SessionState {
+  timestamp: string;
+  turnNumber: number;
+  summary: string;
+  recentFileOps: { read: string[]; modified: string[] };
+  activePlan: string | null;
+}
+
+const SESSION_STATE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
+
+export function saveSessionState(state: SessionState, cwd?: string): void {
+  const p = paths(cwd).sessionState;
+  writeFileSync(p, JSON.stringify(state, null, 2) + '\n');
+}
+
+export function loadSessionState(cwd?: string): SessionState | null {
+  const p = paths(cwd).sessionState;
+  if (!existsSync(p)) return null;
+  try {
+    const data = JSON.parse(readFileSync(p, 'utf-8')) as SessionState;
+    // Skip if stale (> 24h old)
+    const age = Date.now() - new Date(data.timestamp).getTime();
+    if (age > SESSION_STATE_MAX_AGE) return null;
+    return data;
+  } catch { return null; }
+}
+
 // ── Stats ───────────────────────────────────────────────────────────────────
 
 export interface MemoryStats {
@@ -370,12 +412,14 @@ export interface MemoryStats {
   taskCount: number;
   historyLines: number;
   contentCount: number;
+  resultCount: number;
 }
 
 export function getStats(cwd?: string): MemoryStats {
   const p = paths(cwd);
   const historyRaw = read(p.history);
   const contentCount = getAllContentRefs().length;
+  const resultCount = getAllResultRefs().length;
   return {
     globalMemory: existsSync(p.globalMemory) && read(p.globalMemory).length > 0,
     projectMemory: existsSync(p.projectMemory) && read(p.projectMemory).length > 0,
@@ -383,6 +427,7 @@ export function getStats(cwd?: string): MemoryStats {
     taskCount: loadTasks(cwd).length,
     historyLines: historyRaw ? historyRaw.trim().split('\n').filter(Boolean).length : 0,
     contentCount,
+    resultCount,
   };
 }
 
@@ -400,6 +445,13 @@ export function clearProject(cwd?: string): void {
   if (existsSync(pointer)) unlinkSync(pointer);
   // Clear content cache, index, and in-memory refs
   clearContentCache(cwd || process.cwd());
+  // Clear result cache, index, and in-memory refs
+  clearResultCache(cwd || process.cwd());
+  // Clear checkpoints
+  const checkpointsDir = join(p.projectDir, 'checkpoints');
+  if (existsSync(checkpointsDir)) rmSync(checkpointsDir, { recursive: true });
+  // Clear session state
+  if (existsSync(p.sessionState)) unlinkSync(p.sessionState);
 }
 
 export function clearAll(cwd?: string): void {

@@ -53,6 +53,19 @@ export interface InputEvent {
   skip?: boolean;
 }
 
+export interface CheckpointCreateEvent {
+  id: string;
+  label?: string;
+  messageIndex: number;
+  turnNumber: number;
+}
+
+export interface CheckpointRestoreEvent {
+  id: string;
+  mode: 'code' | 'conversation' | 'both' | 'summarize';
+  cancel?: boolean;
+}
+
 // ── Event map ──
 
 export type EventMap = {
@@ -64,6 +77,8 @@ export type EventMap = {
   tool_result: ToolResultEvent;
   before_compact: BeforeCompactEvent;
   input: InputEvent;
+  checkpoint_create: CheckpointCreateEvent;
+  checkpoint_restore: CheckpointRestoreEvent;
 };
 
 export type EventName = keyof EventMap;

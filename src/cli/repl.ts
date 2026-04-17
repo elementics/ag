@@ -572,6 +572,10 @@ export class REPL {
         console.error(`  ${C.cyan}/plan${C.reset}                  Show current plan`);
         console.error(`  ${C.cyan}/plan list${C.reset}             List all plans`);
         console.error(`  ${C.cyan}/plan use <name>${C.reset}       Activate an older plan`);
+        console.error(`  ${C.cyan}/checkpoint [label]${C.reset}    Create a named checkpoint`);
+        console.error(`  ${C.cyan}/checkpoint list${C.reset}       List all checkpoints`);
+        console.error(`  ${C.cyan}/rewind${C.reset}                Rewind to a checkpoint`);
+        console.error(`  ${C.cyan}/rewind last${C.reset}           Rewind to most recent checkpoint`);
         console.error(`  ${C.cyan}/context${C.reset}               Show context breakdown + usage`);
         console.error(`  ${C.cyan}/context compact${C.reset}       Force context compaction now`);
         console.error(`  ${C.cyan}/config${C.reset}                Show config + file paths`);
@@ -674,6 +678,7 @@ export class REPL {
           console.error(`  Plans:   ${C.cyan}${stats.planCount}${C.reset}`);
           console.error(`  Tasks:   ${C.cyan}${stats.taskCount}${C.reset}`);
           console.error(`  Content: ${C.cyan}${stats.contentCount}${C.reset}`);
+          console.error(`  Results: ${C.cyan}${stats.resultCount}${C.reset}`);
           console.error(`  History: ${C.cyan}${stats.historyLines}${C.reset} messages`);
           if (global) console.error(`\n${C.bold}Global:${C.reset}\n${renderMarkdown(global)}`);
           if (project) console.error(`\n${C.bold}Project:${C.reset}\n${renderMarkdown(project)}`);
@@ -703,6 +708,98 @@ export class REPL {
           const content = this.agent.getPlan();
           console.error(content ? `${C.bold}Current plan:${C.reset}\n${renderMarkdown(content)}\n` : `${C.dim}No plans yet.${C.reset}\n`);
         }
+        break;
+      }
+
+      // ── /checkpoint ──────────────────────────────────────────────────
+      case 'checkpoint': {
+        const store = this.agent.getCheckpointStore();
+        if (!store) { console.error(`${C.dim}Checkpoints not available.${C.reset}\n`); break; }
+
+        const subCmd = args[0]?.toLowerCase();
+        if (subCmd === 'list') {
+          const list = store.list();
+          if (list.length === 0) { console.error(`${C.dim}No checkpoints yet.${C.reset}\n`); break; }
+          console.error(`${C.bold}Checkpoints (${list.length}):${C.reset}`);
+          list.forEach(cp => {
+            const ts = new Date(cp.timestamp).toLocaleTimeString();
+            const files = cp.fileBackups.length > 0 ? ` (${cp.fileBackups.length} file backup${cp.fileBackups.length > 1 ? 's' : ''})` : '';
+            console.error(`  ${C.cyan}#${cp.id}${C.reset} ${cp.label || `turn ${cp.turnNumber}`} ${C.dim}${ts}${files}${C.reset}`);
+          });
+          console.error('');
+        } else {
+          // Manual checkpoint with optional label
+          const label = args.join(' ') || undefined;
+          const cp = store.create(this.agent.getMessages().length, 0, label);
+          console.error(`${C.green}Checkpoint #${cp.id} created${label ? `: ${label}` : ''}${C.reset}\n`);
+        }
+        break;
+      }
+
+      // ── /rewind ───────────────────────────────────────────────────────
+      case 'rewind': {
+        const store = this.agent.getCheckpointStore();
+        if (!store) { console.error(`${C.dim}Checkpoints not available.${C.reset}\n`); break; }
+        const list = store.list();
+        if (list.length === 0) { console.error(`${C.dim}No checkpoints to rewind to.${C.reset}\n`); break; }
+
+        const subCmd = args[0]?.toLowerCase();
+        let target = subCmd === 'last' ? store.latest() : undefined;
+
+        if (!target) {
+          // Show list and ask user to pick
+          console.error(`${C.bold}Checkpoints:${C.reset}`);
+          list.forEach(cp => {
+            const ts = new Date(cp.timestamp).toLocaleTimeString();
+            const files = cp.fileBackups.length > 0 ? ` (${cp.fileBackups.length} files)` : '';
+            console.error(`  ${C.cyan}#${cp.id}${C.reset} ${cp.label || `turn ${cp.turnNumber}`} ${C.dim}${ts}${files}${C.reset}`);
+          });
+          console.error('');
+          const answer = await new Promise<string>(resolve => {
+            this.rl.question(`${C.yellow}Rewind to checkpoint #: ${C.reset}`, resolve);
+          });
+          target = store.get(answer.trim());
+          if (!target) { console.error(`${C.dim}Cancelled.${C.reset}\n`); break; }
+        }
+
+        // Ask restore mode
+        console.error(`\n${C.bold}Rewind to #${target.id} (${target.label})${C.reset}`);
+        console.error(`  1. Restore code & conversation`);
+        console.error(`  2. Restore conversation only`);
+        console.error(`  3. Restore code only`);
+        console.error(`  4. Cancel`);
+        const mode = await new Promise<string>(resolve => {
+          this.rl.question(`${C.yellow}Choice: ${C.reset}`, resolve);
+        });
+
+        const restoreEvent = { id: target.id, mode: 'both' as const, cancel: false };
+
+        switch (mode.trim()) {
+          case '1': {
+            await this.agent.getEvents().emit('checkpoint_restore', { ...restoreEvent, mode: 'both' });
+            const result = store.restoreFiles(target.id);
+            this.agent.truncateMessages(target.messageIndex);
+            console.error(`${C.green}Restored ${result.restored.length} file(s) and conversation to checkpoint #${target.id}${C.reset}`);
+            if (result.failed.length) console.error(`${C.yellow}Failed to restore: ${result.failed.join(', ')}${C.reset}`);
+            break;
+          }
+          case '2': {
+            await this.agent.getEvents().emit('checkpoint_restore', { ...restoreEvent, mode: 'conversation' });
+            this.agent.truncateMessages(target.messageIndex);
+            console.error(`${C.green}Conversation rewound to checkpoint #${target.id}${C.reset}`);
+            break;
+          }
+          case '3': {
+            await this.agent.getEvents().emit('checkpoint_restore', { ...restoreEvent, mode: 'code' });
+            const result = store.restoreFiles(target.id);
+            console.error(`${C.green}Restored ${result.restored.length} file(s) from checkpoint #${target.id}${C.reset}`);
+            if (result.failed.length) console.error(`${C.yellow}Failed to restore: ${result.failed.join(', ')}${C.reset}`);
+            break;
+          }
+          default:
+            console.error(`${C.dim}Cancelled.${C.reset}`);
+        }
+        console.error('');
         break;
       }
 

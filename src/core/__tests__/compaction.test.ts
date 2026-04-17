@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { formatMessagesForCompaction, COMPACT_MSG_CHARS } from '../compaction.js';
-import type { Message, ContentRef } from '../types.js';
+import type { Message, ContentRef, ResultRef } from '../types.js';
 
 describe('formatMessagesForCompaction', () => {
   it('formats string content messages', () => {
@@ -71,5 +71,25 @@ describe('formatMessagesForCompaction', () => {
     const messages: Message[] = [{ role: 'assistant', content: null }];
     const result = formatMessagesForCompaction(messages);
     expect(result[0]).toBe('[assistant]: ');
+  });
+
+  it('replaces result refs with summary descriptions', () => {
+    const ref: ResultRef = {
+      type: 'result_ref', id: 5, tool_name: 'bash',
+      summary: 'npm test — 12 passed, 3 failed',
+      size_chars: 5000, cache_path: '/tmp/r.txt', introduced_turn: 2,
+    };
+    const messages: Message[] = [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'check results' },
+        ref,
+      ],
+    }];
+    const result = formatMessagesForCompaction(messages);
+    expect(result[0]).toContain('check results');
+    expect(result[0]).toContain('result #5');
+    expect(result[0]).toContain('bash');
+    expect(result[0]).toContain('npm test');
   });
 });

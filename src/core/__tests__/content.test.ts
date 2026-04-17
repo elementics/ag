@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import type { Message, ContentRef, ContentBlock, TextBlock, ImageUrlBlock, FileBlock } from '../types.js';
+import type { Message, ContentRef, ResultRef, ContentBlock, TextBlock, ImageUrlBlock, FileBlock } from '../types.js';
 
 // Lazy imports — content.ts will be implemented next
 let getTextContent: (msg: Message) => string;
@@ -22,6 +22,7 @@ let saveContentIndex: (cwd: string) => void;
 let restoreContentIndex: (cwd: string, fallbackMessages?: Message[]) => void;
 let clearContentCache: (cwd: string) => void;
 let pruneContentCache: (cwd: string, maxAgeDays?: number) => void;
+let stripResolvedBlocks: (msg: Message) => Message;
 
 beforeEach(async () => {
   const mod = await import('../content.js');
@@ -42,6 +43,7 @@ beforeEach(async () => {
   restoreContentIndex = mod.restoreContentIndex;
   clearContentCache = mod.clearContentCache;
   pruneContentCache = mod.pruneContentCache;
+  stripResolvedBlocks = mod.stripResolvedBlocks;
   resetContentStore();
 });
 
@@ -689,5 +691,105 @@ describe('pruneContentCache', () => {
     const indexPath = join(process.env.HOME || '', '.ag', 'projects', projId, 'content-refs.json');
     const data = JSON.parse(readFileSync(indexPath, 'utf-8'));
     expect(data.refs.length).toBe(1);
+  });
+});
+
+// ── stripResolvedBlocks ───────────────────────────────────────────────────
+
+describe('stripResolvedBlocks', () => {
+  it('strips _turn field from messages', () => {
+    const msg: Message = { role: 'user', content: 'hello', _turn: 3 };
+    const stripped = stripResolvedBlocks(msg);
+    expect(stripped._turn).toBeUndefined();
+    expect(stripped.content).toBe('hello');
+  });
+
+  it('preserves messages without _turn unchanged', () => {
+    const msg: Message = { role: 'user', content: 'hello' };
+    const stripped = stripResolvedBlocks(msg);
+    expect(stripped.content).toBe('hello');
+  });
+
+  it('collapses large tool call arguments', () => {
+    const largeContent = 'x'.repeat(5000);
+    const msg: Message = {
+      role: 'assistant', content: null, _turn: 1,
+      tool_calls: [{
+        id: 'tc1', type: 'function',
+        function: { name: 'file', arguments: JSON.stringify({ action: 'write', path: '/big.html', content: largeContent }) },
+      }],
+    };
+    const stripped = stripResolvedBlocks(msg);
+    const args = JSON.parse(stripped.tool_calls![0].function.arguments);
+    expect(args._collapsed).toBe(true);
+    expect(args._summary).toContain('write');
+    expect(args._summary).toContain('/big.html');
+    expect(args.action).toBe('write');
+    expect(args.path).toBe('/big.html');
+    expect(args.content).toBeUndefined(); // Large content removed
+    expect(stripped._turn).toBeUndefined(); // _turn also stripped
+  });
+
+  it('preserves small tool call arguments', () => {
+    const msg: Message = {
+      role: 'assistant', content: null,
+      tool_calls: [{
+        id: 'tc1', type: 'function',
+        function: { name: 'bash', arguments: '{"command":"ls -la"}' },
+      }],
+    };
+    const stripped = stripResolvedBlocks(msg);
+    const args = JSON.parse(stripped.tool_calls![0].function.arguments);
+    expect(args.command).toBe('ls -la');
+    expect(args._collapsed).toBeUndefined();
+  });
+
+  it('strips full text block alongside ResultRef', () => {
+    const ref: ResultRef = {
+      type: 'result_ref', id: 1, tool_name: 'bash',
+      summary: 'test output summary', size_chars: 5000,
+      cache_path: '/tmp/r.txt', introduced_turn: 2,
+    };
+    const msg: Message = {
+      role: 'tool', tool_call_id: 'tc1',
+      content: [{ type: 'text', text: 'full output here...' }, ref],
+    };
+    const stripped = stripResolvedBlocks(msg);
+    const blocks = stripped.content as ContentBlock[];
+    // Full text should be stripped, only ResultRef remains
+    expect(blocks.length).toBe(1);
+    expect(blocks[0].type).toBe('result_ref');
+  });
+
+  it('replaces image_url blocks with placeholder text', () => {
+    const msg: Message = {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'look' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+      ],
+    };
+    const stripped = stripResolvedBlocks(msg);
+    const blocks = stripped.content as ContentBlock[];
+    expect(blocks[1].type).toBe('text');
+    expect((blocks[1] as TextBlock).text).toContain('stripped from history');
+  });
+
+  it('handles edit action arg collapsing', () => {
+    const largeOld = 'x'.repeat(3000);
+    const msg: Message = {
+      role: 'assistant', content: null,
+      tool_calls: [{
+        id: 'tc1', type: 'function',
+        function: { name: 'file', arguments: JSON.stringify({ action: 'edit', path: '/src/a.ts', old_string: largeOld, new_string: 'small' }) },
+      }],
+    };
+    const stripped = stripResolvedBlocks(msg);
+    const args = JSON.parse(stripped.tool_calls![0].function.arguments);
+    expect(args._collapsed).toBe(true);
+    expect(args._summary).toContain('edit');
+    expect(args._summary).toContain('/src/a.ts');
+    expect(args.old_string).toBeUndefined();
+    expect(args.new_string).toBeUndefined();
   });
 });

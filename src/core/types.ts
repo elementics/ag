@@ -32,7 +32,18 @@ export interface ContentRef {
   introduced_turn: number;
 }
 
-export type ContentBlock = TextBlock | ImageUrlBlock | FileBlock | ContentRef;
+/** Lightweight pointer to a cached tool result — full content sent on introduction turn only */
+export interface ResultRef {
+  type: 'result_ref';
+  id: number;
+  tool_name: string;
+  summary: string;
+  size_chars: number;
+  cache_path: string;
+  introduced_turn: number;
+}
+
+export type ContentBlock = TextBlock | ImageUrlBlock | FileBlock | ContentRef | ResultRef;
 
 // ── Message ─────────────────────────────────────────────────────────────────
 
@@ -41,6 +52,8 @@ export interface Message {
   content: string | ContentBlock[] | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
+  /** Internal turn number — used for turn collapsing, stripped before API send and history write */
+  _turn?: number;
 }
 
 export interface ToolCall {

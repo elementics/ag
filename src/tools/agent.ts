@@ -5,6 +5,7 @@
 import { Tool } from '../core/types.js';
 import { withTasks } from '../memory/memory.js';
 import type { Agent } from '../core/agent.js';
+import { extractFileOps, summarizeTurn } from '../core/summarization.js';
 
 export function agentTool(parentAgent: Agent): Tool {
   return {
@@ -91,7 +92,24 @@ export function agentTool(parentAgent: Agent): Tool {
         const tokens = tracker.getUsedTokens();
         const usageLine = tokens ? `\n[sub-agent used ~${Math.round(tokens / 1000)}K tokens]` : '';
 
-        return result + usageLine;
+        // Generate structured summary of sub-agent work
+        const childMessages = child.getMessages();
+        const fileOps = extractFileOps(childMessages);
+        try {
+          const summary = await summarizeTurn(childMessages, 0, {
+            baseURL: parentAgent.getBaseURL(),
+            apiKey: parentAgent.getApiKey(),
+            model: parentAgent.getModel(),
+          });
+          const fileLines = [
+            fileOps.read.length ? `Files read: ${fileOps.read.join(', ')}` : null,
+            fileOps.modified.length ? `Files modified: ${fileOps.modified.join(', ')}` : null,
+          ].filter(Boolean).join('\n');
+          return `${summary.summary}${fileLines ? '\n\n---\n' + fileLines : ''}${usageLine}`;
+        } catch {
+          // Summarization failed — return raw result
+          return result + usageLine;
+        }
       } catch (error) {
         return `Sub-agent error: ${error}`;
       }

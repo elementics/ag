@@ -89,6 +89,10 @@ All commands follow the pattern: `/noun` to show, `/noun subcommand` to act.
 /plan                       Show current plan
 /plan list                  List all plans
 /plan use <name>            Activate an older plan
+/checkpoint [label]          Create a named checkpoint
+/checkpoint list            View all checkpoints
+/rewind                     Rewind to a checkpoint (interactive)
+/rewind last                Quick rewind to most recent checkpoint
 /context                    Show context window usage
 /context compact            Force context compaction now
 /config                     Show config + file paths
@@ -127,6 +131,8 @@ All action-based tools follow the pattern: `tool(action, ...params)`.
 | `web` | `fetch`, `search` | Fetch web pages, search for current info |
 | `content` | `add`, `list`, `paste`, `screenshot`, `clear` | Attach images/PDFs to messages |
 | `task` | `create`, `list`, `update`, `read`, `remove`, `clear` | Track tasks for multi-step work |
+| `result` | `get`, `info` | Retrieve cached tool results by ref ID |
+| `history` | `search`, `recent` | Search or browse conversation history |
 | `agent` | — | Spawn sub-agents for parallel work |
 | `skill` | — | Activate a skill by name |
 
@@ -303,6 +309,8 @@ Loaded: global, 3 skill(s), 1 extension(s)
 | `tool_result` | After tool executes | content, isError |
 | `before_compact` | Before context compaction | cancel, customSummary |
 | `turn_end` | After iteration completes | Read-only |
+| `checkpoint_create` | After checkpoint created | Read-only |
+| `checkpoint_restore` | Before rewind executes | cancel |
 
 Handlers run sequentially — each handler sees mutations from previous handlers. Use `agent.on(event, handler)` which returns an unsubscribe function. Use `agent.log(message)` for spinner-safe output.
 
@@ -376,6 +384,11 @@ Three tiers, all plain markdown you can edit directly:
         2026-04-13T12-31-22-add-auth.md
       tasks.json                    # task tracking (created on demand)
       history.jsonl                 # conversation history (created on demand)
+      results/                     # cached tool results (send-once pattern)
+        index.json
+      checkpoints/                 # conversation + file checkpoints
+        index.json
+      session-state.json           # session resume context
 ```
 
 All memory is injected into the system prompt on every API call (capped at ~4000 chars per section to avoid context bloat). The agent reads it automatically and writes via the `memory` and `plan` tools.
@@ -458,7 +471,7 @@ Deny rules always override allow rules. Use `/permissions` to manage rules inter
 
 ### Built-in Classifications
 
-**Always allowed (no prompt):** `file(read)`, `file(list)`, `grep(*)`, `memory(*)`, `plan(*)`, `skill(*)`, `git(status)`, `web(search)`, `task(*)`, `agent(*)`, `content(*)`
+**Always allowed (no prompt):** `file(read)`, `file(list)`, `grep(*)`, `memory(*)`, `plan(*)`, `skill(*)`, `git(status)`, `web(search)`, `task(*)`, `agent(*)`, `content(*)`, `result(*)`, `history(*)`
 
 **Prompted:** `bash`, `file(write)`, `file(edit)`, `git(commit/push/branch)`, `web(fetch)`
 
@@ -517,6 +530,10 @@ Tools execute in parallel when the model returns multiple tool calls.
 - For multi-step coding tasks, the agent creates a plan before starting and updates it as it goes.
 - For simple questions, it just answers directly.
 - At 200 iterations the REPL asks if you want to continue.
+- Large tool results (>2KB) are cached to disk and replaced with summaries on subsequent turns — the LLM can retrieve full content on demand via `result(action=get)`.
+- Large tool call arguments (file writes, edits) are collapsed after the introduction turn.
+- Turns with 3+ tool calls are automatically summarized; older turns are replaced with summaries in API calls.
+- Checkpoints are created automatically at each turn start. Use `/rewind` to roll back code, conversation, or both.
 - At 90% context window usage, ag automatically summarizes older conversation messages to free space. Use `/context compact` to trigger manually. Only message history is compacted — system prompt, tools, and skills are unaffected.
 
 ## When to use something else
@@ -551,7 +568,10 @@ src/
   core/guardrails.ts  # prompt injection scanning (5 threat categories)
   core/loader.ts      # custom tool loader (~/.ag/tools/, .ag/tools/)
   core/permissions.ts # permission manager with glob pattern matching
-  memory/memory.ts    # memory, plans, tasks, history
+  core/results.ts     # result ref cache (send-once for large tool outputs)
+  core/summarization.ts # turn summarization (LLM-generated summaries)
+  core/checkpoint.ts  # checkpoint store (file backups + conversation snapshots)
+  memory/memory.ts    # memory, plans, tasks, history, session state
   tools/agent.ts      # sub-agent spawning (in-process, parallel)
   tools/bash.ts       # shell execution + background processes
   tools/file.ts       # file reading + directory listing
@@ -562,6 +582,8 @@ src/
   tools/task.ts       # task tracking tool
   tools/web.ts        # web fetch + search tool
   tools/skill.ts      # skill activation tool
+  tools/result.ts     # result retrieval tool
+  tools/history.ts    # conversation history search tool
 ```
 
 Zero npm dependencies. Node.js 20+ and TypeScript.

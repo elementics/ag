@@ -2,7 +2,7 @@
  * Context compaction — summarize older messages to free context window space
  */
 
-import type { Message, ContentRef } from './types.js';
+import type { Message, ContentRef, ResultRef } from './types.js';
 import { C } from './colors.js';
 import { startSpinner, fetchWithRetry } from './utils.js';
 import { getTextContent, describeContent } from './content.js';
@@ -41,12 +41,16 @@ export function formatMessagesForCompaction(messages: Message[]): string[] {
       line = `[tool result]: ${getTextContent(m).slice(0, COMPACT_MSG_CHARS)}`;
     } else {
       let text = getTextContent(m);
-      // Append content ref descriptions so they survive compaction
+      // Append content/result ref descriptions so they survive compaction
       if (Array.isArray(m.content)) {
         const contentDescs = m.content
           .filter((b): b is ContentRef => b.type === 'content_ref')
           .map(ref => `[content #${ref.id}: ${describeContent(ref)}]`);
         if (contentDescs.length) text += ' ' + contentDescs.join(' ');
+        const resultDescs = m.content
+          .filter((b): b is ResultRef => b.type === 'result_ref')
+          .map(ref => `[result #${ref.id} from ${ref.tool_name}: ${ref.summary}]`);
+        if (resultDescs.length) text += ' ' + resultDescs.join(' ');
       }
       line = `[${m.role}]: ${text.slice(0, COMPACT_MSG_CHARS)}`;
     }

@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSy
 import { join, extname, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { AG_DIR } from './constants.js';
-import type { Message, ContentRef, TextBlock, ImageUrlBlock, FileBlock } from './types.js';
+import type { Message, ContentRef, ResultRef, TextBlock, ImageUrlBlock, FileBlock } from './types.js';
 
 // ── Project-scoped content cache dir ────────────────────────────────────────
 
@@ -267,28 +267,101 @@ export function resolveContent(ref: ContentRef): ImageUrlBlock | FileBlock {
 
 // ── Resolve messages for API ────────────────────────────────────────────────
 
+/** Threshold for collapsing large tool call arguments (reuse from results) */
+const ARG_COLLAPSE_THRESHOLD = 2048;
+
+/** Generate a concise summary of tool call arguments */
+function summarizeArgs(toolName: string, args: Record<string, unknown>): string {
+  const action = args.action as string | undefined;
+  const path = (args.path || args.file_path) as string | undefined;
+  const content = args.content as string | undefined;
+  const oldString = args.old_string as string | undefined;
+  const newString = args.new_string as string | undefined;
+
+  if (toolName === 'file' && action === 'write' && content) {
+    return `write ${path || 'file'} (${content.length} chars — use file(action=read) to view)`;
+  }
+  if (toolName === 'file' && action === 'edit' && (oldString || newString)) {
+    const totalChars = (oldString?.length || 0) + (newString?.length || 0);
+    return `edit ${path || 'file'} (${totalChars} chars of changes — use file(action=read) to view)`;
+  }
+  if (toolName === 'bash' && args.command) {
+    const cmd = String(args.command);
+    return cmd.length > 200 ? cmd.slice(0, 200) + '...' : cmd;
+  }
+  return `${toolName}(${action || '...'}) — large arguments`;
+}
+
 export function resolveMessagesForAPI(messages: Message[], currentTurn: number): Message[] {
   const reRequested = consumeRequestedRefs();
 
-  return messages.map(msg => {
+  // Find the last assistant message with tool_calls — that's the current turn, don't collapse it
+  let lastToolAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'assistant' && messages[i].tool_calls?.length) {
+      lastToolAssistantIdx = i;
+      break;
+    }
+  }
+
+  return messages.map((msg, msgIdx) => {
+    // ── Collapse large tool call arguments on older turns ──
+    if (msg.role === 'assistant' && msg.tool_calls?.length && msgIdx < lastToolAssistantIdx) {
+      const hasLargeArgs = msg.tool_calls.some(tc => tc.function.arguments.length > ARG_COLLAPSE_THRESHOLD);
+      if (hasLargeArgs) {
+        const collapsed = msg.tool_calls.map(tc => {
+          if (tc.function.arguments.length <= ARG_COLLAPSE_THRESHOLD) return tc;
+          let args: Record<string, unknown>;
+          try { args = JSON.parse(tc.function.arguments); } catch { return tc; }
+          const summary = summarizeArgs(tc.function.name, args);
+          // Preserve key fields for context, drop large content
+          const slim: Record<string, unknown> = { _collapsed: true, _summary: summary };
+          if (args.action) slim.action = args.action;
+          if (args.path) slim.path = args.path;
+          if (args.file_path) slim.file_path = args.file_path;
+          return { ...tc, function: { ...tc.function, arguments: JSON.stringify(slim) } };
+        });
+        msg = { ...msg, tool_calls: collapsed };
+      }
+    }
+
+    // ── Content/Result ref handling ──
     if (!Array.isArray(msg.content)) return msg;
 
-    const hasRefs = msg.content.some(b => b.type === 'content_ref');
+    const hasRefs = msg.content.some(b => b.type === 'content_ref' || b.type === 'result_ref');
     if (!hasRefs) return msg;
 
-    const resolved = msg.content.map(block => {
-      if (block.type !== 'content_ref') return block;
-      const ref = block as ContentRef;
+    const resultRef = msg.content.find(b => b.type === 'result_ref') as ResultRef | undefined;
+    const isResultIntroTurn = resultRef && resultRef.introduced_turn === currentTurn;
 
-      if (ref.introduced_turn === currentTurn || reRequested.has(ref.id)) {
-        return resolveContent(ref);
+    const resolved = msg.content.flatMap(block => {
+      if (block.type === 'content_ref') {
+        const ref = block as ContentRef;
+        if (ref.introduced_turn === currentTurn || reRequested.has(ref.id)) {
+          return resolveContent(ref);
+        }
+        return {
+          type: 'text' as const,
+          text: `[content #${ref.id}: ${ref.filename || 'unknown'} — ${describeContent(ref)} — not in current context. Call content(action=get, ref=${ref.id}) to view it.]`,
+        };
       }
 
-      // Older turn — replace with text pointer
-      return {
-        type: 'text' as const,
-        text: `[content #${ref.id}: ${ref.filename || 'unknown'} — ${describeContent(ref)} — not in current context. Call content(action=get, ref=${ref.id}) to view it.]`,
-      };
+      if (block.type === 'result_ref') {
+        const ref = block as ResultRef;
+        if (isResultIntroTurn) {
+          return [];
+        }
+        return {
+          type: 'text' as const,
+          text: `[result #${ref.id} from ${ref.tool_name}: ${ref.summary} — use result(action=get, ref=${ref.id}) for full content]`,
+        };
+      }
+
+      if (block.type === 'text' && resultRef && !isResultIntroTurn) {
+        return [];
+      }
+
+      return block;
     });
 
     return { ...msg, content: resolved };
@@ -458,12 +531,41 @@ export function pruneContentCache(cwd: string, maxAgeDays = CONTENT_EXPIRY_DAYS)
 // ── Strip resolved blocks for history serialization ─────────────────────────
 
 export function stripResolvedBlocks(msg: Message): Message {
+  // Strip internal _turn field — not persisted to history
+  if (msg._turn != null) {
+    const { _turn, ...rest } = msg;
+    msg = rest as Message;
+  }
+
+  // ── Collapse large tool call arguments for history ──
+  if (msg.role === 'assistant' && msg.tool_calls?.length) {
+    const hasLargeArgs = msg.tool_calls.some(tc => tc.function.arguments.length > ARG_COLLAPSE_THRESHOLD);
+    if (hasLargeArgs) {
+      const collapsed = msg.tool_calls.map(tc => {
+        if (tc.function.arguments.length <= ARG_COLLAPSE_THRESHOLD) return tc;
+        let args: Record<string, unknown>;
+        try { args = JSON.parse(tc.function.arguments); } catch { return tc; }
+        const summary = summarizeArgs(tc.function.name, args);
+        const slim: Record<string, unknown> = { _collapsed: true, _summary: summary };
+        if (args.action) slim.action = args.action;
+        if (args.path) slim.path = args.path;
+        if (args.file_path) slim.file_path = args.file_path;
+        return { ...tc, function: { ...tc.function, arguments: JSON.stringify(slim) } };
+      });
+      msg = { ...msg, tool_calls: collapsed };
+    }
+  }
+
   if (!Array.isArray(msg.content)) return msg;
 
-  const stripped = msg.content.map(block => {
+  const hasResultRef = msg.content.some(b => b.type === 'result_ref');
+
+  const stripped = msg.content.flatMap(block => {
     if (block.type === 'image_url' || block.type === 'file') {
-      // Replace resolved blocks with a text description
       return { type: 'text' as const, text: '[resolved content block — stripped from history]' };
+    }
+    if (block.type === 'text' && hasResultRef) {
+      return [];
     }
     return block;
   });
