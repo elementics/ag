@@ -6,7 +6,6 @@
 import { readFileSync, existsSync } from 'node:fs';
 import type { Tool } from '../core/types.js';
 import { paths } from '../memory/memory.js';
-import { getTextContent } from '../core/content.js';
 
 const MAX_SEARCH_RESULTS = 20;
 const MAX_RECENT = 30;

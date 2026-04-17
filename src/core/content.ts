@@ -533,7 +533,7 @@ export function pruneContentCache(cwd: string, maxAgeDays = CONTENT_EXPIRY_DAYS)
 export function stripResolvedBlocks(msg: Message): Message {
   // Strip internal _turn field — not persisted to history
   if (msg._turn != null) {
-    const { _turn, ...rest } = msg;
+    const { _turn: _, ...rest } = msg;
     msg = rest as Message;
   }
 

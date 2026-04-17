@@ -3,7 +3,7 @@
  * File copies (not shadow git) — simple, matches existing storage patterns.
  */
 
-import { readFileSync, writeFileSync, copyFileSync, mkdirSync, existsSync, rmSync, rmdirSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, copyFileSync, mkdirSync, existsSync, rmSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 

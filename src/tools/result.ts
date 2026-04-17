@@ -4,7 +4,7 @@
  */
 
 import type { Tool } from '../core/types.js';
-import { getResultRef, resolveResult, markResultRequested } from '../core/results.js';
+import { getResultRef, markResultRequested } from '../core/results.js';
 
 function doGet(ref?: number): string {
   if (ref === undefined || ref === null) return 'Error: ref is required for action=get.';

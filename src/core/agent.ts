@@ -1,8 +1,8 @@
-import { Message, Tool, AgentConfig, StreamChunk, ConfirmToolCall, ContentBlock, ContentRef, ResultRef } from './types.js';
+import { Message, Tool, AgentConfig, StreamChunk, ConfirmToolCall, ContentBlock, ContentRef } from './types.js';
 import { AgentEventEmitter, type EventName, type EventHandler } from './events.js';
 import { discoverExtensions, loadExtensions, type ExtensionMeta } from './extensions.js';
 import { C } from './colors.js';
-import { loadContext, loadHistory, appendHistory, rewriteHistory, getStats, clearProject, clearAll, paths, saveGlobalMemory, saveProjectMemory, savePlan, appendPlan, setActivePlan, getActivePlanName, loadGlobalMemory, loadProjectMemory, loadPlan, loadPlanByName, listPlans, cleanupTasks, saveSessionState, loadSessionState, type MemoryStats, type SessionState } from '../memory/memory.js';
+import { loadContext, loadHistory, appendHistory, rewriteHistory, getStats, clearProject, clearAll, paths, saveGlobalMemory, saveProjectMemory, savePlan, appendPlan, setActivePlan, getActivePlanName, loadGlobalMemory, loadProjectMemory, loadPlan, loadPlanByName, listPlans, cleanupTasks, saveSessionState, loadSessionState, type MemoryStats } from '../memory/memory.js';
 import { bashToolFactory } from '../tools/bash.js';
 import { memoryTool } from '../tools/memory.js';
 import { planTool } from '../tools/plan.js';
