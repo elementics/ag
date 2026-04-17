@@ -344,16 +344,25 @@ export class REPL {
               clearSpinner();
               process.stdin.removeListener('keypress', onKeypress);
               this.rl.resume();
-              this.rl.question(`  ${C.yellow}steer>${C.reset} `, (answer: string) => {
+              // Buffer line so readline wrapping doesn't overwrite real output above
+              process.stderr.write('\n');
+              const steerPrompt = `  ${C.yellow}steer>${C.reset} `;
+              const steerPromptVisibleLen = 10; // "  steer> "
+              this.rl.question(steerPrompt, (answer: string) => {
                 this.rl.pause();
                 if (answer.trim()) {
                   this.agent.queueSteer(answer.trim());
                 }
-                // Clear the steer prompt line, show acknowledgement
-                process.stderr.write('\x1b[A\x1b[2K');
+                // Clear all rows: prompt rows + buffer line
+                const cols = process.stderr.columns || 80;
+                const promptRows = Math.ceil((steerPromptVisibleLen + answer.length) / cols);
+                const totalRows = promptRows + 1; // +1 for buffer line
+                for (let i = 0; i < totalRows; i++) process.stderr.write('\x1b[A\x1b[2K');
                 if (answer.trim()) {
                   process.stderr.write(`  ${C.yellow}[steered]${C.reset} ${C.dim}${answer.trim()}${C.reset}\n`);
                 }
+                // Flush any in-progress text before replaying buffered chunks
+                if (hasText) { flushLines(true, true); eraseTrailingBlanks(); hasText = false; }
                 // Flush buffered chunks
                 for (const buffered of chunkBuffer) {
                   renderChunk(buffered);
@@ -377,6 +386,7 @@ export class REPL {
           let hasText = false;
           let hadTools = false;
           let lineBuf = '';
+          let trailingBlanks = 0;
 
           const setSpinner = (fn: (() => void) | null) => {
             activeSpinnerStop = fn;
@@ -390,7 +400,7 @@ export class REPL {
           this.agent.setSpinnerControl({
             pause: () => {
               clearSpinner();
-              if (hasText) { flushLines(true); process.stderr.write('\n'); hasText = false; }
+              if (hasText) { flushLines(true, true); eraseTrailingBlanks(); hasText = false; }
             },
             resume: () => {},
           });
@@ -409,29 +419,35 @@ export class REPL {
             }
           }
 
-          const flushLines = (final: boolean) => {
+          const flushLines = (final: boolean, trimTrailing = false) => {
+            if (trimTrailing) lineBuf = lineBuf.replace(/\n+$/, '');
             const parts = lineBuf.split('\n');
             lineBuf = final ? '' : (parts.pop() || '');
             for (let i = 0; i < parts.length; i++) {
+              if (parts[i] === '') { trailingBlanks++; } else { trailingBlanks = 0; }
               process.stderr.write(renderMarkdown(parts[i]) + '\n');
             }
             if (final && lineBuf) {
               process.stderr.write(renderMarkdown(lineBuf));
+              trailingBlanks = 0;
               lineBuf = '';
             }
+          };
+          const eraseTrailingBlanks = () => {
+            while (trailingBlanks > 0) { process.stderr.write('\x1b[A\x1b[2K'); trailingBlanks--; }
           };
 
           const renderChunk = (chunk: import('../core/types.js').StreamChunk) => {
             switch (chunk.type) {
               case 'thinking':
                 clearSpinner();
-                if (hasText) { flushLines(true); process.stderr.write('\n'); hasText = false; }
+                if (hasText) { flushLines(true, true); eraseTrailingBlanks(); hasText = false; }
                 setSpinner(startSpinner(chunk.content || 'thinking'));
                 break;
               case 'text':
                 clearSpinner();
                 if (!hasText) {
-                  if (hadTools) process.stderr.write('\n');
+                  process.stderr.write('\n');
                   process.stderr.write(`${C.bold}agent>${C.reset} `);
                   hasText = true;
                 }
@@ -440,7 +456,7 @@ export class REPL {
                 break;
               case 'tool_start': {
                 clearSpinner();
-                if (hasText) { flushLines(true); process.stderr.write('\n'); hasText = false; }
+                if (hasText) { flushLines(true, true); eraseTrailingBlanks(); hasText = false; }
                 const cmdPreview = truncateCommand(chunk.content || '', 60);
                 setSpinner(startSpinner(`[${chunk.toolName}] ${cmdPreview}`));
                 break;
@@ -460,8 +476,8 @@ export class REPL {
               }
               case 'done':
                 clearSpinner();
-                if (hasText) { flushLines(true); process.stderr.write('\n\n'); }
-                else if (!hadTools) process.stderr.write(`${C.bold}agent>${C.reset} ${renderMarkdown(chunk.content || '')}\n\n`);
+                if (hasText) { flushLines(true, true); eraseTrailingBlanks(); process.stderr.write('\n'); }
+                else if (!hadTools) process.stderr.write(`\n${C.bold}agent>${C.reset} ${renderMarkdown(chunk.content || '')}\n`);
                 break;
               case 'max_iterations':
                 clearSpinner();

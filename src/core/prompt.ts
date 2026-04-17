@@ -111,12 +111,33 @@ export interface RequestBodyOptions {
   currentTurn?: number;
 }
 
+/** Ensure message content is a valid type for the API (string, array, or null with tool_calls) */
+function sanitizeMessages(msgs: Message[]): Message[] {
+  return msgs.filter(m => {
+    // Drop assistant messages with null/empty content and no tool_calls (invalid)
+    if (m.role === 'assistant' && !m.content && !m.tool_calls?.length) return false;
+    return true;
+  }).map(m => {
+    // Ensure content is string or array — convert null to '' for non-tool-call messages
+    if (m.content === null || m.content === undefined) {
+      if (m.tool_calls?.length) return m; // null content OK with tool_calls
+      return { ...m, content: '' };
+    }
+    // If content is a plain object (not array, not string), stringify it
+    if (typeof m.content !== 'string' && !Array.isArray(m.content)) {
+      return { ...m, content: JSON.stringify(m.content) };
+    }
+    return m;
+  });
+}
+
 export function buildRequestBody(options: RequestBodyOptions): Record<string, unknown> {
   const { model, systemPrompt, messages, tools, stream, currentTurn } = options;
   const resolved = currentTurn !== undefined ? resolveMessagesForAPI(messages, currentTurn) : messages;
+  const sanitized = sanitizeMessages(resolved);
   const body: Record<string, unknown> = {
     model,
-    messages: [{ role: 'system', content: systemPrompt }, ...resolved],
+    messages: [{ role: 'system', content: systemPrompt }, ...sanitized],
     tools,
     tool_choice: 'auto',
   };

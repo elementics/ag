@@ -11,7 +11,7 @@ export function agentTool(parentAgent: Agent): Tool {
     type: 'function',
     function: {
       name: 'agent',
-      description: 'Spawn a sub-agent to work on a task independently. Sub-agents get project memory, plan, skills, and tools but start with a clean context (no conversation history). Use for parallel work: spawn multiple agents to tackle different tasks simultaneously. Each agent runs autonomously and returns its result.',
+      description: 'Spawn a sub-agent to work on a task independently. Sub-agents get project memory, plan, skills, and tools but start with a clean context (no conversation history). To run agents in parallel, call this tool multiple times in a single response — all calls execute concurrently. Each agent runs autonomously and returns its result.',
       parameters: {
         type: 'object',
         properties: {

@@ -120,7 +120,7 @@ export class Agent implements SkillHost {
 - plan — create and manage multi-step task plans
 - web(fetch/search) — fetch pages or search the web
 - task(create/list/update/read/remove/clear) — manage tasks for multi-step work
-- agent(prompt, taskId?, model?) — spawn sub-agents for parallel work. Always include key findings from sub-agents in your response — the user cannot see tool output in full.
+- agent(prompt, taskId?, model?) — spawn sub-agents for parallel work. Call multiple times in one response to run concurrently. Always include key findings from sub-agents in your response — the user cannot see tool output in full.
 - skill — activate a skill by name`;
     this.systemPromptSuffix = config.systemPromptSuffix || '';
     this.silent = config.silent ?? false;
