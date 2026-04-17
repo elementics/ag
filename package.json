@@ -4,10 +4,12 @@
   "description": "Persistent AI coding agent with memory - any model via OpenRouter",
   "type": "module",
   "bin": {
-    "ag": "./dist/cli.js"
+    "ag": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/__tests__",
+    "!dist/**/*.map"
   ],
   "engines": {
     "node": ">=20.0.0"
