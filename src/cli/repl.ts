@@ -6,7 +6,7 @@ import { C, renderMarkdown } from '../core/colors.js';
 import { VERSION } from '../core/version.js';
 import { PermissionManager, inferPattern } from '../core/permissions.js';
 import type { ConfirmToolCall, PermissionKey, ContentBlock, ContentRef } from '../core/types.js';
-import { ingestContent, describeContent, displayContent, getAllContentRefs, resetContentStore } from '../core/content.js';
+import { ingestContent, describeContent, displayContent, getAllContentRefs } from '../core/content.js';
 
 function truncateCommand(command: string, maxLen = 80): string {
   const firstLine = command.split('\n')[0];
@@ -252,7 +252,12 @@ export class REPL {
     const stats = this.agent.getStats();
     const skills = this.agent.getSkills();
     console.error('');
-    console.error(`${C.bold}ag v${VERSION}${C.reset} ${C.dim}(${this.agent.getModel()} via OpenRouter)${C.reset}`);
+    const p = this.agent.getPaths();
+    const projHash = p.projectDir.split('/').pop() || '';
+    const baseURL = this.agent.getBaseURL();
+    const provider = baseURL === 'https://openrouter.ai/api/v1' ? 'OpenRouter' : baseURL.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    console.error(`${C.bold}ag v${VERSION}${C.reset} ${C.dim}(${this.agent.getModel()} via ${provider})${C.reset}`);
+    console.error(`${C.dim}${process.cwd()} (${projHash})${C.reset}`);
     const customTools = this.agent.getTools().filter(t => !t.isBuiltin);
     const extensions = this.agent.getLoadedExtensions();
     const loaded = [
@@ -718,7 +723,7 @@ export class REPL {
 
       // ── /config ───────────────────────────────────────────────────────
       case 'config': {
-        const validKeys: (keyof PersistentConfig)[] = ['apiKey', 'model', 'baseURL', 'systemPrompt', 'maxIterations', 'tavilyApiKey', 'autoApprove'];
+        const validKeys: (keyof PersistentConfig)[] = ['apiKey', 'model', 'baseURL', 'systemPrompt', 'maxIterations', 'tavilyApiKey', 'autoApprove', 'contextLength'];
         const keyAliases: Record<string, keyof PersistentConfig> = {
           'tavily_api_key': 'tavilyApiKey',
           'openrouter_api_key': 'apiKey',
@@ -736,7 +741,7 @@ export class REPL {
             break;
           }
           let parsed: string | number | boolean = value;
-          if (key === 'maxIterations') {
+          if (key === 'maxIterations' || key === 'contextLength') {
             const n = parseInt(value, 10);
             if (isNaN(n) || n <= 0) { console.error(`${C.red}Invalid number: ${value}${C.reset}\n`); break; }
             parsed = n;
@@ -758,6 +763,9 @@ export class REPL {
             }
           }
           saveConfig({ [key]: parsed });
+          // Apply live where possible
+          if (key === 'baseURL') this.agent.setBaseURL(parsed as string);
+          if (key === 'contextLength') this.agent.getContextTracker().setContextLength(parsed as number);
           const display = (key === 'apiKey' || key === 'tavilyApiKey') ? maskKey(value) : value;
           console.error(`${C.yellow}Config: ${key} = ${display} (saved)${C.reset}\n`);
         } else if (args[0]?.toLowerCase() === 'unset' && args[1]) {
@@ -771,6 +779,7 @@ export class REPL {
           // Reset live agent state to defaults where applicable
           if (key === 'baseURL') this.agent.setBaseURL('https://openrouter.ai/api/v1');
           if (key === 'model') { this.agent.setModel('anthropic/claude-sonnet-4.6'); }
+          if (key === 'contextLength') { this.agent.setModel(this.agent.getModel()); }
           if (key === 'autoApprove') {
             const freshCb = this.pm
               ? createPermissionCallback(this.pm, this.rl)
@@ -1022,13 +1031,9 @@ export class REPL {
             console.error(`${C.red}Error: ${e instanceof Error ? e.message : String(e)}${C.reset}\n`);
           }
         } else if (subCmd === 'clear') {
-          resetContentStore();
-          // Also wipe project content cache on disk
           try {
-            const { paths: memPaths } = await import('../memory/memory.js');
-            const { existsSync: exists, rmSync: rm } = await import('node:fs');
-            const dir = memPaths(process.cwd()).contentDir;
-            if (exists(dir)) rm(dir, { recursive: true });
+            const { clearContentCache } = await import('../core/content.js');
+            clearContentCache(process.cwd());
           } catch { /* ignore cleanup errors */ }
           console.error(`${C.yellow}Cleared all content refs and cache.${C.reset}\n`);
         } else {

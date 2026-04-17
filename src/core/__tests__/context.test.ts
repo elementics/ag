@@ -69,6 +69,13 @@ describe('ContextTracker', () => {
       expect(t.shouldCompact()).toBe(false);
     });
 
+    it('returns true when context length set manually on unknown model at 90%+', () => {
+      const t = new ContextTracker('unknown/model');
+      t.setContextLength(8192);
+      t.update({ prompt_tokens: 7500, completion_tokens: 200, total_tokens: 7700 });
+      expect(t.shouldCompact()).toBe(true); // 7500/8192 = 91.5% >= 90%
+    });
+
     it('returns false when below threshold', () => {
       const t = new ContextTracker('anthropic/claude-sonnet-4.6');
       t.update({ prompt_tokens: 100000, completion_tokens: 200, total_tokens: 100200 });

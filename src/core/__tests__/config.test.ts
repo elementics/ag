@@ -48,6 +48,14 @@ describe('config load/save logic', () => {
     }
     expect(merged).toEqual({ apiKey: 'sk-test' });
   });
+
+  it('contextLength round-trips through config', () => {
+    const original = { model: 'gemma4', contextLength: 131072 };
+    writeFileSync(configFile, JSON.stringify(original));
+    const loaded = JSON.parse(readFileSync(configFile, 'utf-8'));
+    expect(loaded.contextLength).toBe(131072);
+    expect(typeof loaded.contextLength).toBe('number');
+  });
 });
 
 describe('configPath', () => {

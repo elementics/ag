@@ -3,7 +3,7 @@
  * Send-once pattern: full content sent on introduction turn, text pointers on subsequent turns.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, unlinkSync, rmSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { AG_DIR } from './constants.js';
@@ -17,6 +17,10 @@ function projectId(cwd: string): string {
 
 function contentCacheDir(cwd: string): string {
   return join(AG_DIR, 'projects', projectId(cwd), 'content');
+}
+
+function contentIndexPath(cwd: string): string {
+  return join(AG_DIR, 'projects', projectId(cwd), 'content-refs.json');
 }
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -56,7 +60,7 @@ export function consumeRequestedRefs(): Set<number> {
   return result;
 }
 
-/** Restore content refs from loaded conversation history (called on startup) */
+/** Restore content refs from loaded conversation history (migration fallback) */
 export function restoreContentFromHistory(messages: Message[]): void {
   for (const msg of messages) {
     if (!Array.isArray(msg.content)) continue;
@@ -70,6 +74,48 @@ export function restoreContentFromHistory(messages: Message[]): void {
       }
     }
   }
+}
+
+// ── Content index persistence ──────────────────────────────────────────────
+
+/** Save the in-memory content ref map to disk */
+export function saveContentIndex(cwd: string): void {
+  const data = { nextId, refs: [...refs.values()] };
+  const dir = join(AG_DIR, 'projects', projectId(cwd));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(contentIndexPath(cwd), JSON.stringify(data) + '\n');
+}
+
+/** Restore content refs from the persisted index. Falls back to history scan if no index exists. */
+export function restoreContentIndex(cwd: string, fallbackMessages?: Message[]): void {
+  const indexPath = contentIndexPath(cwd);
+  if (existsSync(indexPath)) {
+    try {
+      const data = JSON.parse(readFileSync(indexPath, 'utf-8'));
+      if (Array.isArray(data.refs)) {
+        for (const ref of data.refs as ContentRef[]) {
+          if (existsSync(ref.cache_path)) {
+            refs.set(ref.id, ref);
+          }
+        }
+      }
+      if (typeof data.nextId === 'number' && data.nextId > nextId) {
+        nextId = data.nextId;
+      }
+      return;
+    } catch { /* corrupt index — fall through to migration */ }
+  }
+  // Migration: no index file yet, scan history messages
+  if (fallbackMessages) restoreContentFromHistory(fallbackMessages);
+}
+
+/** Delete all cached content files, the index, and reset the in-memory store. */
+export function clearContentCache(cwd: string): void {
+  const dir = contentCacheDir(cwd);
+  if (existsSync(dir)) rmSync(dir, { recursive: true });
+  const idx = contentIndexPath(cwd);
+  if (existsSync(idx)) unlinkSync(idx);
+  resetContentStore();
 }
 
 export function getContentRef(id: number): ContentRef | undefined {
@@ -189,6 +235,7 @@ export function ingestContent(source: string, cwd: string): ContentRef {
   };
 
   refs.set(id, ref);
+  saveContentIndex(cwd);
   return ref;
 }
 
@@ -356,21 +403,56 @@ export function displayContent(ref: ContentRef): string {
 
 export function pruneContentCache(cwd: string, maxAgeDays = CONTENT_EXPIRY_DAYS): void {
   const dir = contentCacheDir(cwd);
-  if (!existsSync(dir)) return;
   const now = Date.now();
   const maxAge = maxAgeDays * 24 * 60 * 60 * 1000;
+  let indexDirty = false;
+
+  // Prune expired refs from the index
+  const indexPath = contentIndexPath(cwd);
+  if (existsSync(indexPath)) {
+    try {
+      const data = JSON.parse(readFileSync(indexPath, 'utf-8'));
+      if (Array.isArray(data.refs)) {
+        const kept: ContentRef[] = [];
+        for (const ref of data.refs as ContentRef[]) {
+          try {
+            if (!existsSync(ref.cache_path)) { indexDirty = true; continue; }
+            const stat = statSync(ref.cache_path);
+            if (now - stat.mtimeMs > maxAge) {
+              unlinkSync(ref.cache_path);
+              indexDirty = true;
+            } else {
+              kept.push(ref);
+            }
+          } catch { indexDirty = true; }
+        }
+        if (indexDirty) {
+          writeFileSync(indexPath, JSON.stringify({ nextId: data.nextId, refs: kept }) + '\n');
+        }
+      }
+    } catch { /* corrupt index — fall through to directory sweep */ }
+  }
+
+  // Safety sweep: remove any orphaned files not tracked by the index
+  if (!existsSync(dir)) return;
+  const indexedPaths = new Set<string>();
+  try {
+    const data = JSON.parse(readFileSync(indexPath, 'utf-8'));
+    if (Array.isArray(data.refs)) {
+      for (const ref of data.refs) indexedPaths.add(ref.cache_path);
+    }
+  } catch { /* no index or corrupt — sweep all expired files */ }
 
   try {
     for (const file of readdirSync(dir)) {
       const filePath = join(dir, file);
+      if (indexedPaths.has(filePath)) continue; // tracked by index, already handled
       try {
         const stat = statSync(filePath);
-        if (now - stat.mtimeMs > maxAge) {
-          unlinkSync(filePath);
-        }
-      } catch { /* ignore individual file errors */ }
+        if (now - stat.mtimeMs > maxAge) unlinkSync(filePath);
+      } catch { /* ignore */ }
     }
-  } catch { /* directory read error — skip pruning */ }
+  } catch { /* directory read error */ }
 }
 
 // ── Strip resolved blocks for history serialization ─────────────────────────

@@ -18,6 +18,10 @@ let markRefRequested: (id: number) => void;
 let consumeRequestedRefs: () => Set<number>;
 let restoreContentFromHistory: (messages: Message[]) => void;
 let getAllContentRefs: () => ContentRef[];
+let saveContentIndex: (cwd: string) => void;
+let restoreContentIndex: (cwd: string, fallbackMessages?: Message[]) => void;
+let clearContentCache: (cwd: string) => void;
+let pruneContentCache: (cwd: string, maxAgeDays?: number) => void;
 
 beforeEach(async () => {
   const mod = await import('../content.js');
@@ -34,6 +38,10 @@ beforeEach(async () => {
   consumeRequestedRefs = mod.consumeRequestedRefs;
   restoreContentFromHistory = mod.restoreContentFromHistory;
   getAllContentRefs = mod.getAllContentRefs;
+  saveContentIndex = mod.saveContentIndex;
+  restoreContentIndex = mod.restoreContentIndex;
+  clearContentCache = mod.clearContentCache;
+  pruneContentCache = mod.pruneContentCache;
   resetContentStore();
 });
 
@@ -529,5 +537,157 @@ describe('estimateMessageContentChars', () => {
   it('returns 0 for messages with only text blocks', () => {
     const msg: Message = { role: 'user', content: [{ type: 'text', text: 'just text' }] };
     expect(estimateMessageContentChars(msg, 1)).toBe(0);
+  });
+});
+
+// ── saveContentIndex / restoreContentIndex ─────────────────────────────────
+
+describe('content index persistence', () => {
+  beforeEach(() => { mkdirSync(testDir, { recursive: true }); });
+  afterEach(() => { if (existsSync(testDir)) rmSync(testDir, { recursive: true }); });
+
+  it('saveContentIndex writes valid JSON with refs and nextId', () => {
+    const pngPath = join(testDir, 'idx.png');
+    writeFileSync(pngPath, createMinimalPNG());
+    ingestContent(pngPath, testDir);
+    // ingestContent auto-saves — verify the index file exists
+    const { createHash } = require('node:crypto');
+    const projId = createHash('md5').update(testDir).digest('hex').slice(0, 12);
+    const indexPath = join(process.env.HOME || '', '.ag', 'projects', projId, 'content-refs.json');
+    expect(existsSync(indexPath)).toBe(true);
+    const data = JSON.parse(readFileSync(indexPath, 'utf-8'));
+    expect(data.nextId).toBeGreaterThan(0);
+    expect(Array.isArray(data.refs)).toBe(true);
+    expect(data.refs.length).toBe(1);
+    expect(data.refs[0].media_type).toBe('image/png');
+  });
+
+  it('restoreContentIndex populates store from saved index', () => {
+    const pngPath = join(testDir, 'restore.png');
+    writeFileSync(pngPath, createMinimalPNG());
+    const ref = ingestContent(pngPath, testDir);
+    const refId = ref.id;
+
+    // Reset store, then restore from index
+    resetContentStore();
+    expect(getAllContentRefs().length).toBe(0);
+    restoreContentIndex(testDir);
+    expect(getAllContentRefs().length).toBe(1);
+    expect(getAllContentRefs()[0].id).toBe(refId);
+  });
+
+  it('restoreContentIndex filters out refs with missing cache files', () => {
+    const pngPath = join(testDir, 'missing.png');
+    writeFileSync(pngPath, createMinimalPNG());
+    ingestContent(pngPath, testDir);
+
+    // Delete the cached file
+    const refs = getAllContentRefs();
+    if (existsSync(refs[0].cache_path)) rmSync(refs[0].cache_path);
+
+    resetContentStore();
+    restoreContentIndex(testDir);
+    expect(getAllContentRefs().length).toBe(0);
+  });
+
+  it('restoreContentIndex falls back to history scan when no index exists', () => {
+    const pngPath = join(testDir, 'fallback.png');
+    writeFileSync(pngPath, createMinimalPNG());
+    const ref = ingestContent(pngPath, testDir);
+
+    // Delete the index file
+    const { createHash } = require('node:crypto');
+    const projId = createHash('md5').update(testDir).digest('hex').slice(0, 12);
+    const indexPath = join(process.env.HOME || '', '.ag', 'projects', projId, 'content-refs.json');
+    if (existsSync(indexPath)) rmSync(indexPath);
+
+    resetContentStore();
+    const messages: Message[] = [{ role: 'user', content: [ref] }];
+    restoreContentIndex(testDir, messages);
+    expect(getAllContentRefs().length).toBe(1);
+  });
+
+  it('ingestContent auto-saves the index', () => {
+    const pngPath = join(testDir, 'autosave.png');
+    writeFileSync(pngPath, createMinimalPNG());
+    ingestContent(pngPath, testDir);
+
+    const { createHash } = require('node:crypto');
+    const projId = createHash('md5').update(testDir).digest('hex').slice(0, 12);
+    const indexPath = join(process.env.HOME || '', '.ag', 'projects', projId, 'content-refs.json');
+    expect(existsSync(indexPath)).toBe(true);
+  });
+});
+
+// ── clearContentCache ──────────────────────────────────────────────────────
+
+describe('clearContentCache', () => {
+  beforeEach(() => { mkdirSync(testDir, { recursive: true }); });
+  afterEach(() => { if (existsSync(testDir)) rmSync(testDir, { recursive: true }); });
+
+  it('deletes content dir, index file, and resets store', () => {
+    const pngPath = join(testDir, 'clear.png');
+    writeFileSync(pngPath, createMinimalPNG());
+    const ref = ingestContent(pngPath, testDir);
+
+    // Verify files exist before clear
+    expect(existsSync(ref.cache_path)).toBe(true);
+    expect(getAllContentRefs().length).toBe(1);
+
+    clearContentCache(testDir);
+
+    expect(getAllContentRefs().length).toBe(0);
+    expect(existsSync(ref.cache_path)).toBe(false);
+
+    const { createHash } = require('node:crypto');
+    const projId = createHash('md5').update(testDir).digest('hex').slice(0, 12);
+    const indexPath = join(process.env.HOME || '', '.ag', 'projects', projId, 'content-refs.json');
+    expect(existsSync(indexPath)).toBe(false);
+  });
+});
+
+// ── pruneContentCache (index-driven) ───────────────────────────────────────
+
+describe('pruneContentCache', () => {
+  beforeEach(() => { mkdirSync(testDir, { recursive: true }); });
+  afterEach(() => { if (existsSync(testDir)) rmSync(testDir, { recursive: true }); });
+
+  it('removes expired refs from index and deletes their files', () => {
+    const pngPath = join(testDir, 'expire.png');
+    writeFileSync(pngPath, createMinimalPNG());
+    const ref = ingestContent(pngPath, testDir);
+
+    // Backdate the cached file so it's definitely expired
+    const { utimesSync } = require('node:fs');
+    const oldTime = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000); // 90 days ago
+    utimesSync(ref.cache_path, oldTime, oldTime);
+
+    // Prune with 30 days max age — file is 90 days old, should be pruned
+    pruneContentCache(testDir, 30);
+
+    expect(existsSync(ref.cache_path)).toBe(false);
+
+    const { createHash } = require('node:crypto');
+    const projId = createHash('md5').update(testDir).digest('hex').slice(0, 12);
+    const indexPath = join(process.env.HOME || '', '.ag', 'projects', projId, 'content-refs.json');
+    const data = JSON.parse(readFileSync(indexPath, 'utf-8'));
+    expect(data.refs.length).toBe(0);
+  });
+
+  it('keeps non-expired refs intact', () => {
+    const pngPath = join(testDir, 'keep.png');
+    writeFileSync(pngPath, createMinimalPNG());
+    const ref = ingestContent(pngPath, testDir);
+
+    // Prune with 30 days — just-created file should survive
+    pruneContentCache(testDir, 30);
+
+    expect(existsSync(ref.cache_path)).toBe(true);
+
+    const { createHash } = require('node:crypto');
+    const projId = createHash('md5').update(testDir).digest('hex').slice(0, 12);
+    const indexPath = join(process.env.HOME || '', '.ag', 'projects', projId, 'content-refs.json');
+    const data = JSON.parse(readFileSync(indexPath, 'utf-8'));
+    expect(data.refs.length).toBe(1);
   });
 });

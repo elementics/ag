@@ -45,6 +45,7 @@ export OPENROUTER_API_KEY=sk-or-v1-...
 -s, --system <prompt>     Custom system prompt
 -b, --base-url <url>      API base URL (default: OpenRouter; use for local LLMs)
 -n, --max-iterations <n>  Max tool-call iterations (default: 200)
+-c, --content <path>      Attach image/PDF (repeatable: -c img.png -c doc.pdf)
 -y, --yes                 Auto-approve all tool calls (skip confirmation prompts)
     --stats               Show memory file paths and status
 -h, --help                Show help
@@ -341,7 +342,8 @@ Persistent settings are stored in `~/.ag/config.json`:
   "model": "anthropic/claude-sonnet-4.6",
   "baseURL": "https://openrouter.ai/api/v1",
   "maxIterations": 25,
-  "tavilyApiKey": "tvly-..."
+  "tavilyApiKey": "tvly-...",
+  "contextLength": 131072
 }
 ```
 
@@ -391,11 +393,11 @@ The agent sees your memory context and will name branches, write commit messages
 
 ## Local LLMs
 
-Point `ag` at any OpenAI-compatible API:
+Point `ag` at any OpenAI-compatible API. No API key is needed when using a custom base URL:
 
 ```bash
-ag -b http://localhost:11434/v1 "hello"           # Ollama
-ag -b http://localhost:1234/v1 "hello"             # LM Studio
+ag -b http://localhost:11434/v1 -m gemma4 "hello"   # Ollama
+ag -b http://localhost:1234/v1 -m llama3 "hello"     # LM Studio
 ```
 
 Or set it permanently:
@@ -403,8 +405,12 @@ Or set it permanently:
 ```bash
 # In the REPL:
 /config set baseURL http://localhost:11434/v1
-/config unset baseURL                            # back to OpenRouter default
+/config set model gemma4
+/config set contextLength 131072              # enables context tracking + auto-compaction
+/config unset baseURL                         # back to OpenRouter default
 ```
+
+Set `contextLength` to your model's context window size so that context tracking and auto-compaction work correctly. Without it, ag can't know the limit and won't compact automatically.
 
 ## Permissions
 

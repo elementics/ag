@@ -1,9 +1,9 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync, rmdirSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync, rmdirSync, rmSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Message } from '../core/types.js';
 import { AG_DIR } from '../core/constants.js';
-import { stripResolvedBlocks, resetContentStore, getAllContentRefs } from '../core/content.js';
+import { stripResolvedBlocks, clearContentCache, getAllContentRefs } from '../core/content.js';
 
 function projectId(cwd: string): string {
   return createHash('md5').update(cwd).digest('hex').slice(0, 12);
@@ -224,13 +224,44 @@ export function loadContext(cwd?: string, options?: { skipTasks?: boolean }): st
   return parts.join('\n\n');
 }
 
+/** Read the last N lines from a file by seeking backwards from EOF. */
+export function readTailLines(path: string, count: number): string[] {
+  if (!existsSync(path)) return [];
+  const fd = openSync(path, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return [];
+
+    const CHUNK = 8192;
+    let pos = size;
+    let tail = '';
+    let newlines = 0;
+
+    while (pos > 0 && newlines <= count) {
+      const readSize = Math.min(CHUNK, pos);
+      pos -= readSize;
+      const buf = Buffer.alloc(readSize);
+      readSync(fd, buf, 0, readSize, pos);
+      const chunk = buf.toString('utf-8');
+      tail = chunk + tail;
+      for (let i = 0; i < chunk.length; i++) {
+        if (chunk.charCodeAt(i) === 10) newlines++;
+      }
+    }
+
+    const lines = tail.split('\n').filter(Boolean);
+    return lines.slice(-count);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** Load recent user/assistant messages from history (for session continuity) */
 export function loadHistory(cwd?: string, limit = 20): Message[] {
-  const raw = read(paths(cwd).history);
-  if (!raw) return [];
-  const lines = raw.trim().split('\n').filter(Boolean);
+  const historyPath = paths(cwd).history;
+  const lines = readTailLines(historyPath, limit * 3);
   const messages: Message[] = [];
-  for (const line of lines.slice(-limit * 3)) {
+  for (const line of lines) {
     try {
       const msg = JSON.parse(line);
       if (msg.role === 'user' || msg.role === 'assistant' || msg.role === 'tool') {
@@ -367,9 +398,8 @@ export function clearProject(cwd?: string): void {
   }
   const pointer = currentPointerPath(cwd);
   if (existsSync(pointer)) unlinkSync(pointer);
-  // Clear content cache and in-memory refs
-  if (existsSync(p.contentDir)) rmSync(p.contentDir, { recursive: true });
-  resetContentStore();
+  // Clear content cache, index, and in-memory refs
+  clearContentCache(cwd || process.cwd());
 }
 
 export function clearAll(cwd?: string): void {

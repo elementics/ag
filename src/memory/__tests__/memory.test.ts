@@ -11,6 +11,7 @@ import {
   loadContext, loadHistory, appendHistory, getStats,
   clearProject, clearAll,
   loadTasks, saveTasks, cleanupTasks,
+  readTailLines,
   type Task,
 } from '../memory.js';
 
@@ -379,5 +380,48 @@ describe('cleanupTasks', () => {
 
   it('handles missing tasks file', () => {
     cleanupTasks(fakeCwd); // should not throw
+  });
+});
+
+// ── readTailLines ──────────────────────────────────────────────────────────
+
+describe('readTailLines', () => {
+  const tailTestFile = join(fakeCwd, 'tail-test.txt');
+
+  it('returns last N lines from a file', () => {
+    const lines = Array.from({ length: 100 }, (_, i) => `line-${i + 1}`);
+    writeFileSync(tailTestFile, lines.join('\n') + '\n');
+    const result = readTailLines(tailTestFile, 5);
+    expect(result).toEqual(['line-96', 'line-97', 'line-98', 'line-99', 'line-100']);
+  });
+
+  it('returns all lines when file has fewer than N', () => {
+    writeFileSync(tailTestFile, 'one\ntwo\nthree\n');
+    const result = readTailLines(tailTestFile, 10);
+    expect(result).toEqual(['one', 'two', 'three']);
+  });
+
+  it('handles empty file', () => {
+    writeFileSync(tailTestFile, '');
+    expect(readTailLines(tailTestFile, 5)).toEqual([]);
+  });
+
+  it('handles nonexistent file', () => {
+    expect(readTailLines('/tmp/nonexistent-ag-test-file', 5)).toEqual([]);
+  });
+
+  it('handles single line with no trailing newline', () => {
+    writeFileSync(tailTestFile, 'only-line');
+    expect(readTailLines(tailTestFile, 5)).toEqual(['only-line']);
+  });
+
+  it('handles large file efficiently', () => {
+    // 10000 lines — readTailLines should only read the tail, not the whole file
+    const lines = Array.from({ length: 10000 }, (_, i) => `{"role":"user","content":"msg-${i}"}`);
+    writeFileSync(tailTestFile, lines.join('\n') + '\n');
+    const result = readTailLines(tailTestFile, 60);
+    expect(result.length).toBe(60);
+    expect(result[59]).toBe('{"role":"user","content":"msg-9999"}');
+    expect(result[0]).toBe('{"role":"user","content":"msg-9940"}');
   });
 });

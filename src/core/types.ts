@@ -95,6 +95,7 @@ export interface AgentConfig {
   noHistory?: boolean;
   noSubAgents?: boolean;
   silent?: boolean;
+  contextLength?: number;
 }
 
 export interface StreamChunk {

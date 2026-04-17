@@ -12,7 +12,7 @@ import { cleanupBackgroundProcesses } from './tools/bash.js';
 import { ingestContent, describeContent } from './core/content.js';
 import type { ContentBlock } from './core/types.js';
 
-async function ensureApiKey(cliKey?: string): Promise<string> {
+async function ensureApiKey(cliKey?: string, baseURL?: string): Promise<string> {
   // 1. CLI flag
   if (cliKey) return cliKey;
   // 2. Environment variable
@@ -20,7 +20,9 @@ async function ensureApiKey(cliKey?: string): Promise<string> {
   // 3. Config file
   const config = loadConfig();
   if (config.apiKey) return config.apiKey;
-  // 4. Interactive prompt (TTY only)
+  // 4. Custom base URL (local models don't need a key)
+  if (baseURL && baseURL !== 'https://openrouter.ai/api/v1') return '';
+  // 5. Interactive prompt (TTY only)
   if (process.stdin.isTTY) {
     console.error(`\n${C.bold}Welcome to ag!${C.reset}\n`);
     console.error(`Get your API key at: ${C.cyan}https://openrouter.ai/keys${C.reset}\n`);
@@ -49,7 +51,8 @@ async function main(): Promise<void> {
   const { tools: extraTools, failures: toolFailures } = await loadUserTools(process.cwd());
 
   const config = loadConfig();
-  const apiKey = await ensureApiKey(options.key);
+  const resolvedBaseURL = options.baseURL || config.baseURL;
+  const apiKey = await ensureApiKey(options.key, resolvedBaseURL);
 
   // One-shot mode (piped) auto-approves; REPL mode prompts unless --yes or config
   const autoApprove = options.yes || positional.length > 0 || config.autoApprove === true;
@@ -59,9 +62,10 @@ async function main(): Promise<void> {
   const agent = new Agent({
     apiKey,
     model: options.model || config.model,
-    baseURL: options.baseURL || config.baseURL,
+    baseURL: resolvedBaseURL,
     systemPrompt: options.system || config.systemPrompt,
     maxIterations: options.maxIterations || config.maxIterations,
+    contextLength: config.contextLength,
     extraTools,
     toolFailures,
     confirmToolCall,

@@ -11,6 +11,7 @@ export interface PersistentConfig {
   maxIterations?: number;
   tavilyApiKey?: string;
   autoApprove?: boolean;
+  contextLength?: number;
 }
 
 export function configPath(): string {

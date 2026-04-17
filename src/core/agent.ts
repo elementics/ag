@@ -14,7 +14,7 @@ import { agentTool } from '../tools/agent.js';
 import { grepTool } from '../tools/grep.js';
 import { fileTool } from '../tools/file.js';
 import { contentTool } from '../tools/content.js';
-import { consumeRequestedRefs, resolveContent, getContentRef, restoreContentFromHistory, pruneContentCache, estimateMessageContentChars } from './content.js';
+import { consumeRequestedRefs, resolveContent, getContentRef, restoreContentIndex, pruneContentCache, estimateMessageContentChars } from './content.js';
 import { discoverSkills, buildSkillCatalog, getAlwaysOnContent, loadSkillTools, type SkillMeta } from './skills.js';
 import { ContextTracker } from './context.js';
 import { startSpinner, fetchWithRetry, truncateToolResult, raceAll } from './utils.js';
@@ -59,11 +59,11 @@ export class Agent implements SkillHost {
   private currentTurn = 0;
 
   constructor(config: AgentConfig = {}) {
-    this.apiKey = config.apiKey || process.env.OPENROUTER_API_KEY || '';
-    if (!this.apiKey) throw new Error('No API key. Set OPENROUTER_API_KEY, pass -k, or run `ag` interactively to configure.');
-
     this.model = config.model || 'anthropic/claude-sonnet-4.6';
     this.baseURL = config.baseURL || 'https://openrouter.ai/api/v1';
+    this.apiKey = config.apiKey || process.env.OPENROUTER_API_KEY || '';
+    const isDefaultBaseURL = this.baseURL === 'https://openrouter.ai/api/v1';
+    if (!this.apiKey && isDefaultBaseURL) throw new Error('No API key. Set OPENROUTER_API_KEY, pass -k, or run `ag` interactively to configure.');
     this.baseSystemPrompt = config.systemPrompt || `You are ag, a coding agent that completes tasks by calling tools. You work autonomously — never ask the user for information you can find yourself.
 
 # Tool use
@@ -151,6 +151,7 @@ export class Agent implements SkillHost {
 
     // Context window tracking
     this.contextTracker = new ContextTracker(this.model);
+    if (config.contextLength) this.contextTracker.setContextLength(config.contextLength);
 
     // Cache context and skill catalog (invalidated on skill activation/refresh)
     this.refreshCache();
@@ -158,7 +159,7 @@ export class Agent implements SkillHost {
     // Load recent conversation history for continuity (sub-agents start clean)
     if (!config.noHistory) {
       this.messages = loadHistory(this.cwd);
-      restoreContentFromHistory(this.messages);
+      restoreContentIndex(this.cwd, this.messages);
       pruneContentCache(this.cwd);
       cleanupTasks(this.cwd);
     }
