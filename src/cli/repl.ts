@@ -1,5 +1,6 @@
 import { createInterface, Interface, emitKeypressEvents } from 'node:readline';
 import { Agent } from '../core/agent.js';
+import { promptInput, setBeforePromptHook } from '../core/utils.js';
 import { loadConfig, saveConfig, configPath, PersistentConfig } from '../core/config.js';
 import { searchRegistry, installSkill, removeSkill, formatInstalls } from '../core/registry.js';
 import { C, renderMarkdown } from '../core/colors.js';
@@ -32,12 +33,7 @@ function promptQuestion(prompt: string, sharedRl?: Interface): Promise<string> {
     return new Promise<string>(resolve => sharedRl.question(prompt, resolve));
   }
   // Fallback: create a temporary readline; exit raw mode so it can work properly
-  const wasRaw = process.stdin.isTTY && (process.stdin as any).isRaw;
-  if (wasRaw) process.stdin.setRawMode(false);
-  return new Promise<string>(resolve => {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    rl.question(prompt, a => { rl.close(); resolve(a); });
-  }).finally(() => { if (wasRaw) process.stdin.setRawMode(true); });
+  return promptInput(prompt);
 }
 
 const SIMPLE_OPTS = `    ${C.cyan}y${C.reset}/${C.cyan}n${C.reset} > `;
@@ -405,6 +401,16 @@ export class REPL {
             resume: () => {},
           });
 
+          // Register before-prompt hook so tool-internal prompts (e.g. ensureTavilyKey)
+          // wait for steer and clear the spinner before opening readline
+          setBeforePromptHook(async () => {
+            while (steerActive) {
+              await new Promise<void>(r => { steerResolve = r; });
+            }
+            clearSpinner();
+            if (hasText) { flushLines(true, true); eraseTrailingBlanks(); hasText = false; }
+          });
+
           // Wrap permissions to wait for steer to finish
           if (this.confirmCb) {
             const originalCb = this.agent.getConfirmToolCall();
@@ -516,6 +522,7 @@ export class REPL {
               process.stdin.removeListener('keypress', onKeypress);
             }
             this.agent.setSpinnerControl(null);
+            setBeforePromptHook(null);
             // Restore original confirm callback if we wrapped it
             if (this.confirmCb) {
               this.agent.setConfirmToolCall(this.confirmCb);
@@ -877,6 +884,7 @@ export class REPL {
           }
           saveConfig({ [key]: parsed });
           // Apply live where possible
+          if (key === 'apiKey') this.agent.setApiKey(parsed as string);
           if (key === 'baseURL') this.agent.setBaseURL(parsed as string);
           if (key === 'contextLength') this.agent.getContextTracker().setContextLength(parsed as number);
           const display = (key === 'apiKey' || key === 'tavilyApiKey') ? maskKey(value) : value;
@@ -890,6 +898,7 @@ export class REPL {
           }
           saveConfig({ [key]: undefined });
           // Reset live agent state to defaults where applicable
+          if (key === 'apiKey') this.agent.setApiKey('');
           if (key === 'baseURL') this.agent.setBaseURL('https://openrouter.ai/api/v1');
           if (key === 'model') { this.agent.setModel('anthropic/claude-sonnet-4.6'); }
           if (key === 'contextLength') { this.agent.setModel(this.agent.getModel()); }

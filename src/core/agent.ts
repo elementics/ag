@@ -33,9 +33,10 @@ export { fetchWithRetry, truncateToolResult, raceAll } from './utils.js';
 export { getEnvironmentContext, isReadOnlyToolCall } from './prompt.js';
 
 const MAX_MESSAGES = 200;
+const MAX_EMPTY_RETRIES = 2;
 
 export class Agent implements SkillHost {
-  private readonly apiKey: string;
+  private apiKey: string;
   private model: string;
   private baseURL: string;
   private readonly baseSystemPrompt: string;
@@ -436,6 +437,7 @@ export class Agent implements SkillHost {
       });
     }
 
+    let emptyRetries = 0;
     for (let i = 0; i < this.maxIterations; i++) {
       // ── Abort check: top of iteration ──
       if (signal?.aborted) {
@@ -512,6 +514,7 @@ export class Agent implements SkillHost {
       let assistantContent = '';
       const toolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map();
       let usage: import('./types.js').Usage | null = null;
+      let lastFinishReason: string | null = null;
       let streamAborted = false;
 
       const reader = res.body.getReader();
@@ -539,7 +542,9 @@ export class Agent implements SkillHost {
             // Capture usage from any chunk that has it (may coexist with delta)
             if (parsed.usage) usage = parsed.usage;
 
-            const delta = parsed.choices?.[0]?.delta;
+            const choice = parsed.choices?.[0];
+            if (choice?.finish_reason) lastFinishReason = choice.finish_reason;
+            const delta = choice?.delta;
             if (!delta) continue;
 
             // Text content
@@ -600,10 +605,19 @@ export class Agent implements SkillHost {
       }
 
       // ── after_response event ──
-      await this.events.emit('after_response', { message: msg, usage: usage ?? undefined });
+      await this.events.emit('after_response', { message: msg, usage: usage ?? undefined, finishReason: lastFinishReason });
 
       this.messages.push(msg);
       this.appendToHistory(msg);
+
+      // ── Empty response glitch: nudge the model to continue ──
+      if (!msg.tool_calls?.length && !assistantContent && emptyRetries < MAX_EMPTY_RETRIES) {
+        emptyRetries++;
+        const nudge: Message = { role: 'user', content: 'You stopped without responding. Continue working on the task. If you are done, provide your final response.' };
+        this.messages.push(nudge);
+        this.appendToHistory(nudge);
+        continue;
+      }
 
       if (!msg.tool_calls?.length) {
         // ── turn_end event (no tools) ──
@@ -777,6 +791,7 @@ export class Agent implements SkillHost {
       }
 
       // ── turn_end event ──
+      emptyRetries = 0; // reset after successful tool execution
       turnToolCallCount += msg.tool_calls.length;
       await this.events.emit('turn_end', { iteration: i, hadToolCalls: true, toolCallCount: msg.tool_calls.length });
     }
@@ -862,6 +877,7 @@ export class Agent implements SkillHost {
   }
   setModel(model: string): void { this.model = model; this.contextTracker = new ContextTracker(model); }
   setBaseURL(url: string): void { this.baseURL = url; }
+  setApiKey(key: string): void { this.apiKey = key; }
   getConfirmToolCall(): ConfirmToolCall | null { return this.confirmToolCall; }
   setConfirmToolCall(cb: ConfirmToolCall | null): void { this.confirmToolCall = cb; }
   async compactNow(): Promise<void> { await this.compactConversation(); }

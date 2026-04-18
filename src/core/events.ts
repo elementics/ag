@@ -24,6 +24,7 @@ export interface BeforeRequestEvent {
 export interface AfterResponseEvent {
   message: Message;
   usage?: Usage;
+  finishReason?: string | null;
 }
 
 export interface ToolCallEvent {

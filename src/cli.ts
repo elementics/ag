@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { createInterface } from 'node:readline';
 import { Agent } from './core/agent.js';
 import { REPL, createPermissionCallback } from './cli/repl.js';
 import { parseArgs, showHelp } from './cli/parser.js';
@@ -8,6 +7,7 @@ import { loadUserTools } from './core/loader.js';
 import { loadConfig, saveConfig, configPath } from './core/config.js';
 import { PermissionManager } from './core/permissions.js';
 import { C } from './core/colors.js';
+import { promptInput } from './core/utils.js';
 import { cleanupBackgroundProcesses } from './tools/bash.js';
 import { ingestContent, describeContent } from './core/content.js';
 import type { ContentBlock } from './core/types.js';
@@ -26,11 +26,7 @@ async function ensureApiKey(cliKey?: string, baseURL?: string): Promise<string> 
   if (process.stdin.isTTY) {
     console.error(`\n${C.bold}Welcome to ag!${C.reset}\n`);
     console.error(`Get your API key at: ${C.cyan}https://openrouter.ai/keys${C.reset}\n`);
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    const key = await new Promise<string>(resolve =>
-      rl.question(`${C.yellow}Enter your OpenRouter API key:${C.reset} `, resolve)
-    );
-    rl.close();
+    const key = await promptInput(`${C.yellow}Enter your OpenRouter API key:${C.reset} `);
     const trimmed = key.trim();
     if (!trimmed) {
       throw new Error('No API key provided.');

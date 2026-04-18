@@ -84,3 +84,44 @@ export async function* raceAll<T>(promises: Promise<T>[]): AsyncGenerator<T> {
     yield result.v;
   }
 }
+
+// ── Prompt serialization ────────────────────────────────────────────────────
+
+let _lockChain: Promise<void> = Promise.resolve();
+
+/** Async mutex — callers execute one at a time, in request order. */
+export async function acquirePromptLock(): Promise<() => void> {
+  let release!: () => void;
+  const prev = _lockChain;
+  _lockChain = new Promise<void>(resolve => { release = resolve; });
+  await prev;
+  return release;
+}
+
+let _beforePromptHook: (() => void | Promise<void>) | null = null;
+
+/** Register a hook called before any promptInput (e.g. to pause spinner/wait for steer) */
+export function setBeforePromptHook(hook: (() => void | Promise<void>) | null): void {
+  _beforePromptHook = hook;
+}
+
+// ── Raw-mode-safe readline prompt ───────────────────────────────────────────
+
+/** Prompt the user for input, safely toggling raw mode off/on around readline.
+ *  Acquires the prompt lock so concurrent tool prompts are serialized.
+ *  Calls the before-prompt hook so the spinner/steer can be paused first. */
+export async function promptInput(prompt: string): Promise<string> {
+  const release = await acquirePromptLock();
+  try {
+    await _beforePromptHook?.();
+    const { createInterface } = await import('node:readline');
+    const wasRaw = process.stdin.isTTY && (process.stdin as any).isRaw;
+    if (wasRaw) process.stdin.setRawMode(false);
+    return await new Promise<string>(resolve => {
+      const rl = createInterface({ input: process.stdin, output: process.stderr });
+      rl.question(prompt, answer => { rl.close(); resolve(answer); });
+    }).finally(() => { if (wasRaw) process.stdin.setRawMode(true); });
+  } finally {
+    release();
+  }
+}

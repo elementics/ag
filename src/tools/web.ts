@@ -1,6 +1,6 @@
-import { createInterface } from 'node:readline';
 import { Tool } from '../core/types.js';
 import { loadConfig, saveConfig } from '../core/config.js';
+import { promptInput } from '../core/utils.js';
 
 // ── HTML stripping (native fallback when Jina is unavailable) ─────────────
 
@@ -126,11 +126,7 @@ async function ensureTavilyKey(): Promise<string | null> {
     const C = await import('../core/colors.js').then(m => m.C);
     console.error(`\n${C.bold}Web search requires a Tavily API key${C.reset}`);
     console.error(`Sign up free (no credit card): ${C.cyan}https://app.tavily.com${C.reset}\n`);
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    const key = await new Promise<string>(resolve =>
-      rl.question(`${C.yellow}Enter your Tavily API key:${C.reset} `, resolve)
-    );
-    rl.close();
+    const key = await promptInput(`${C.yellow}Enter your Tavily API key:${C.reset} `);
     const trimmed = key.trim();
     if (!trimmed) return null;
     saveConfig({ tavilyApiKey: trimmed });
