@@ -8,6 +8,7 @@ import { loadConfig, saveConfig, configPath } from './core/config.js';
 import { PermissionManager } from './core/permissions.js';
 import { C } from './core/colors.js';
 import { promptInput } from './core/utils.js';
+import { needsSetup, runSetupWizard } from './cli/setup.js';
 import { cleanupBackgroundProcesses } from './tools/bash.js';
 import { ingestContent, describeContent } from './core/content.js';
 import type { ContentBlock } from './core/types.js';
@@ -45,6 +46,10 @@ async function main(): Promise<void> {
   if (options.help) { showHelp(); process.exit(0); }
 
   const { tools: extraTools, failures: toolFailures } = await loadUserTools(process.cwd());
+
+  if (!options.key && needsSetup()) {
+    await runSetupWizard();
+  }
 
   const config = loadConfig();
   const resolvedBaseURL = options.baseURL || config.baseURL;

@@ -569,7 +569,7 @@ export class Agent implements SkillHost {
                   const unique = [...new Set(names)];
                   const label = unique.length === 1 && unique[0] === 'agent'
                     ? `preparing ${names.length} sub-agent${names.length > 1 ? 's' : ''}`
-                    : `preparing ${names.join(', ')}`;
+                    : `preparing ${unique.join(', ')}`;
                   yield { type: 'thinking', content: label };
                 }
                 if (tc.function?.arguments) entry.arguments += tc.function.arguments;
