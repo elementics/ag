@@ -587,7 +587,7 @@ export class Agent implements SkillHost {
           streamAborted = true;
         } else { throw e; }
       } finally {
-        try { reader.cancel(); } catch { /* already closed */ }
+        try { await reader.cancel(); } catch { /* already closed or errored */ }
       }
 
       // If aborted during streaming, discard partial message

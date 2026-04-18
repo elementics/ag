@@ -11,8 +11,8 @@ const BG_INITIAL_WAIT = 2000; // ms to wait for initial output from background p
 
 const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; message: string }> = [
   { pattern: /\bfind\s+[~\/](?![\w.])/, message: 'Blocked: `find` on home/root directory. Use the grep tool (action=find) to search for files, or scope to a specific subdirectory.' },
-  { pattern: /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*)?\s*-[a-zA-Z]*f[a-zA-Z]*\s+[~\/]/, message: 'Blocked: destructive `rm` targeting home or root directory.' },
-  { pattern: /\brm\s+(-[a-zA-Z]*f[a-zA-Z]*)?\s*-[a-zA-Z]*r[a-zA-Z]*\s+[~\/]/, message: 'Blocked: destructive `rm` targeting home or root directory.' },
+  { pattern: /\brm\b(?![^\n]*-[a-zA-Z]*r)[^\n]*-[a-zA-Z]*f[a-zA-Z]*\s+(~|\/($|\s))/, message: 'Blocked: `rm -f` targeting home or root directory.' },
+  { pattern: /\brm\b[^\n]*-[a-zA-Z]*r[a-zA-Z]*[^\n]*\s+(~|~\/|\/($|\s|\*|[^\/\s]+(\s|$)))/, message: 'Blocked: recursive `rm` targeting home, root, or system directory.' },
   { pattern: /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|f[a-zA-Z]*r)[a-zA-Z]*\s+\/\*/, message: 'Blocked: destructive `rm` targeting root glob.' },
   { pattern: /:\(\)\{.*:\|:/, message: 'Blocked: fork bomb detected.' },
   { pattern: /\bdd\b.*\bof=\/dev\//, message: 'Blocked: dd write to device.' },
