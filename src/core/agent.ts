@@ -34,6 +34,7 @@ export { getEnvironmentContext, isReadOnlyToolCall } from './prompt.js';
 
 const MAX_MESSAGES = 200;
 const MAX_EMPTY_RETRIES = 2;
+const MAX_CONSECUTIVE_TOOL_FAILURES = 3;
 
 export class Agent implements SkillHost {
   private apiKey: string;
@@ -438,7 +439,11 @@ export class Agent implements SkillHost {
     }
 
     let emptyRetries = 0;
+    let consecutiveAllFailTurns = 0;
     for (let i = 0; i < this.maxIterations; i++) {
+      // ── Refresh context cache so plan/task changes are visible immediately ──
+      this.refreshCache();
+
       // ── Abort check: top of iteration ──
       if (signal?.aborted) {
         this.messages.push({ role: 'assistant', content: '[interrupted by user]' });
@@ -613,7 +618,7 @@ export class Agent implements SkillHost {
       // ── Empty response glitch: nudge the model to continue ──
       if (!msg.tool_calls?.length && !assistantContent && emptyRetries < MAX_EMPTY_RETRIES) {
         emptyRetries++;
-        const nudge: Message = { role: 'user', content: 'You stopped without responding. Continue working on the task. If you are done, provide your final response.' };
+        const nudge: Message = { role: 'user', content: 'Your previous response was empty (no text or tool calls). If you need to take an action, call a tool. If the task is complete, say so.' };
         this.messages.push(nudge);
         this.appendToHistory(nudge);
         continue;
@@ -725,8 +730,10 @@ export class Agent implements SkillHost {
 
       // Yield results as they resolve (not waiting for all)
       const completedCallIds = new Set<string>();
+      const execResults: Array<{ call: typeof msg.tool_calls[0]; content: string; isError: boolean }> = [];
       for await (const r of raceAll(execPromises)) {
         completedCallIds.add(r.call.id);
+        execResults.push(r);
 
         // If a content(get) or result(get) tool was called, inject the actual content
         let toolContent: string | ContentBlock[] = r.content;
@@ -793,6 +800,25 @@ export class Agent implements SkillHost {
       // ── turn_end event ──
       emptyRetries = 0; // reset after successful tool execution
       turnToolCallCount += msg.tool_calls.length;
+
+      // ── Consecutive tool failure detection ──
+      const allFailed = execResults.length > 0 && execResults.every(r => r.isError);
+      if (allFailed) {
+        consecutiveAllFailTurns++;
+        if (consecutiveAllFailTurns >= MAX_CONSECUTIVE_TOOL_FAILURES) {
+          const recentErrors = execResults.map(r => `${r.call.function.name}: ${r.content}`).join('\n');
+          const hint: Message = {
+            role: 'user',
+            content: `Your last ${MAX_CONSECUTIVE_TOOL_FAILURES} tool attempts all failed. Recent errors:\n${recentErrors}\nTry a different approach or explain what is blocking you.`,
+          };
+          this.messages.push(hint);
+          this.appendToHistory(hint);
+          consecutiveAllFailTurns = 0;
+        }
+      } else {
+        consecutiveAllFailTurns = 0;
+      }
+
       await this.events.emit('turn_end', { iteration: i, hadToolCalls: true, toolCallCount: msg.tool_calls.length });
     }
     yield { type: 'max_iterations' };

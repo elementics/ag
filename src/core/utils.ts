@@ -76,12 +76,17 @@ export function truncateToolResult(result: string): string {
 /** Yield promise results as they resolve (like Promise.all but streaming) */
 export async function* raceAll<T>(promises: Promise<T>[]): AsyncGenerator<T> {
   type Indexed = { i: number; v: T };
-  const wrapped = promises.map((p, i) => p.then(v => ({ i, v } as Indexed)));
+  type Settled = Indexed & { error?: unknown };
+  // Catch rejections so they don't become unhandled when the caller breaks early (e.g. on abort)
+  const wrapped = promises.map((p, i) =>
+    p.then(v => ({ i, v } as Settled)).catch(e => ({ i, v: undefined as unknown, error: e } as Settled))
+  );
   const settled = new Set<number>();
   while (settled.size < promises.length) {
     const result = await Promise.race(wrapped.filter((_, idx) => !settled.has(idx)));
     settled.add(result.i);
-    yield result.v;
+    if ('error' in result && result.error !== undefined) continue;
+    yield result.v as T;
   }
 }
 
