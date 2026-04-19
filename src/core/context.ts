@@ -38,6 +38,9 @@ export class ContextTracker {
   private promptCostPerToken: number | null = null;
   private completionCostPerToken: number | null = null;
 
+  // Session identity
+  private sessionId: string | null = null;
+
   constructor(modelId: string) {
     // Try exact match, then prefix match for variants like model:beta
     this.contextLength = KNOWN_CONTEXT[modelId]
@@ -56,6 +59,8 @@ export class ContextTracker {
     this.cumCachedTokens += usage.prompt_tokens_details?.cached_tokens ?? 0;
     if (usage.cost != null) this.cumResponseCost += usage.cost;
   }
+
+  setSessionId(id: string): void { this.sessionId = id; }
 
   setPricing(promptPerToken: number, completionPerToken: number): void {
     this.promptCostPerToken = promptPerToken;
@@ -129,7 +134,12 @@ export class ContextTracker {
   formatSession(): string {
     if (this.cumPromptTokens === 0 && this.cumCompletionTokens === 0) return '';
 
-    let line = `${C.dim}↑${formatTokens(this.cumPromptTokens)} | ↓${formatTokens(this.cumCompletionTokens)}${C.reset}`;
+    const parts: string[] = [];
+    if (this.sessionId) parts.push(this.sessionId);
+    parts.push(`↑${formatTokens(this.cumPromptTokens)}`);
+    parts.push(`↓${formatTokens(this.cumCompletionTokens)}`);
+
+    let line = `${C.dim}${parts.join(' | ')}${C.reset}`;
 
     const cost = this.getSessionCost();
     if (cost !== null && cost > 0) {

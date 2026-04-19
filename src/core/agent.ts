@@ -25,6 +25,7 @@ import { getEnvironmentContext, isReadOnlyToolCall, getProjectListing, buildRequ
 import { compactMessages, COMPACT_THRESHOLD, COMPACT_HEAD_KEEP, COMPACT_TAIL_KEEP } from './compaction.js';
 import { summarizeTurn, extractFileOps, TURN_SUMMARY_THRESHOLD, type TurnSummary } from './summarization.js';
 import { CheckpointStore } from './checkpoint.js';
+import { randomBytes } from 'node:crypto';
 
 export const MAX_ITERATIONS_REACHED = '[Max iterations reached]';
 
@@ -64,10 +65,10 @@ export class Agent implements SkillHost {
   private readonly noHistory: boolean;
   private steerQueue: string[] = [];
   private currentTurn = 0;
+  private sessionId = randomBytes(4).toString('hex');
   private turnSummaries = new Map<number, import('./summarization.js').TurnSummary>();
   private turnMessageStartIndex = 0;
   private checkpointStore: CheckpointStore | null = null;
-  private currentCheckpointId: string | null = null;
   private resumedSession: import('../memory/memory.js').SessionState | null = null;
 
   constructor(config: AgentConfig = {}) {
@@ -140,6 +141,7 @@ export class Agent implements SkillHost {
 
     // Context window tracking
     this.contextTracker = new ContextTracker(this.model);
+    this.contextTracker.setSessionId(this.sessionId);
     if (config.contextLength) this.contextTracker.setContextLength(config.contextLength);
 
     // Cache context and skill catalog (invalidated on skill activation/refresh)
@@ -156,6 +158,7 @@ export class Agent implements SkillHost {
           content: `Resuming previous session. Here's where things stand:\n\n${sessionState.summary}\n\nRecent files read: ${sessionState.recentFileOps.read.join(', ') || 'none'}\nRecent files modified: ${sessionState.recentFileOps.modified.join(', ') || 'none'}${sessionState.activePlan ? `\nActive plan: ${sessionState.activePlan}` : ''}`,
         }];
         this.currentTurn = sessionState.turnNumber;
+        if (sessionState.sessionId) this.sessionId = sessionState.sessionId;
       } else {
         this.messages = loadHistory(this.cwd);
       }
@@ -163,7 +166,16 @@ export class Agent implements SkillHost {
       restoreResultIndex(this.cwd);
       pruneContentCache(this.cwd);
       cleanupTasks(this.cwd);
-      this.checkpointStore = new CheckpointStore(paths(this.cwd).projectDir);
+      CheckpointStore.isAvailable().then(async (available) => {
+        if (!available) {
+          process.stderr.write(`${C.yellow}Checkpoints unavailable — git is required for checkpoint/rewind. Install git to enable.${C.reset}\n`);
+          return;
+        }
+        try {
+          this.checkpointStore = new CheckpointStore(paths(this.cwd).projectDir, this.cwd);
+          await this.checkpointStore.init();
+        } catch { this.checkpointStore = null; }
+      });
     }
   }
 
@@ -298,6 +310,7 @@ export class Agent implements SkillHost {
     // Always extract file ops from messages directly (not just from turn summaries)
     const fileOps = extractFileOps(this.messages);
     saveSessionState({
+      sessionId: this.sessionId,
       timestamp: new Date().toISOString(),
       turnNumber: this.currentTurn,
       summary: summary || 'No activity to summarize.',
@@ -421,8 +434,7 @@ export class Agent implements SkillHost {
 
     // ── Auto-checkpoint at turn start (skip first turn — nothing to rewind to) ──
     if (this.checkpointStore && this.currentTurn > 1) {
-      const cp = this.checkpointStore.create(this.messages.length - 1, this.currentTurn);
-      this.currentCheckpointId = cp.id;
+      const cp = await this.checkpointStore.create(this.messages.length - 1, this.currentTurn, undefined, this.sessionId);
       await this.events.emit('checkpoint_create', {
         id: cp.id, label: cp.label, messageIndex: cp.messageIndex, turnNumber: cp.turnNumber,
       });
@@ -710,17 +722,6 @@ export class Agent implements SkillHost {
         }
       }
 
-      // ── Checkpoint file backups before write tools execute ──
-      if (this.checkpointStore && this.currentCheckpointId) {
-        for (const call of msg.tool_calls) {
-          if (!isReadOnlyToolCall(call.function.name, (() => { try { return JSON.parse(call.function.arguments || '{}'); } catch { return {}; } })())) {
-            const args = (() => { try { return JSON.parse(call.function.arguments || '{}'); } catch { return {}; } })();
-            const filePath = (args.path || args.file_path) as string | undefined;
-            if (filePath) this.checkpointStore.backupFile(this.currentCheckpointId, filePath);
-          }
-        }
-      }
-
       // Execute tool calls — yield results as they complete (not Promise.all)
       const execPromises = msg.tool_calls.map(async (call) => {
         if (signal?.aborted) return { call, content: '[cancelled by user]', isError: true };
@@ -944,7 +945,7 @@ export class Agent implements SkillHost {
   queueSteer(message: string): void {
     this.steerQueue.push(message);
   }
-  setModel(model: string): void { this.model = model; this.contextTracker = new ContextTracker(model); }
+  setModel(model: string): void { this.model = model; this.contextTracker = new ContextTracker(model); this.contextTracker.setSessionId(this.sessionId); }
   setBaseURL(url: string): void { this.baseURL = url; }
   setApiKey(key: string): void { this.apiKey = key; }
   getConfirmToolCall(): ConfirmToolCall | null { return this.confirmToolCall; }
@@ -993,8 +994,8 @@ export class Agent implements SkillHost {
   activatePlan(name: string): void { setActivePlan(name, this.cwd); }
   getActivePlanName(): string | null { return getActivePlanName(this.cwd); }
 
-  clearProject(): void { this.messages = []; this.contextTracker.reset(); this.checkpointStore?.clear(); this.turnSummaries.clear(); clearProject(this.cwd); }
-  clearAll(): void { this.messages = []; this.contextTracker.reset(); this.checkpointStore?.clear(); this.turnSummaries.clear(); clearAll(this.cwd); }
+  async clearProject(): Promise<void> { this.messages = []; this.contextTracker.reset(); await this.checkpointStore?.clear(); this.turnSummaries.clear(); this.currentTurn = 0; this.sessionId = randomBytes(4).toString('hex'); this.contextTracker.setSessionId(this.sessionId); clearProject(this.cwd); }
+  async clearAll(): Promise<void> { this.messages = []; this.contextTracker.reset(); await this.checkpointStore?.clear(); this.turnSummaries.clear(); this.currentTurn = 0; this.sessionId = randomBytes(4).toString('hex'); this.contextTracker.setSessionId(this.sessionId); clearAll(this.cwd); }
 
   // ── Context tracking ───────────────────────────────────────────────────
   getContextUsage(): string { return this.contextTracker.format(); }
@@ -1005,12 +1006,22 @@ export class Agent implements SkillHost {
   getTurnSummaries(): Map<number, TurnSummary> { return new Map(this.turnSummaries); }
   getCheckpointStore(): CheckpointStore | null { return this.checkpointStore; }
   getEvents(): AgentEventEmitter { return this.events; }
+  getCurrentTurn(): number { return this.currentTurn; }
+  getSessionId(): string { return this.sessionId; }
 
   /** Truncate conversation to a specific message index (for rewind) */
-  truncateMessages(toIndex: number): void {
+  truncateMessages(toIndex: number, toTurn?: number): void {
     this.messages = this.messages.slice(0, toIndex);
     // Rewrite history to match the rewound state
     if (!this.noHistory) rewriteHistory(this.messages, this.cwd);
+    // Reset turn and clear stale summaries
+    if (toTurn != null) {
+      this.currentTurn = toTurn;
+      for (const [turn] of this.turnSummaries) {
+        if (turn > toTurn) this.turnSummaries.delete(turn);
+      }
+      this.saveSessionState();
+    }
   }
 
   /** Inject a summary message after rewind */

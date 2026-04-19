@@ -89,8 +89,8 @@ All commands follow the pattern: `/noun` to show, `/noun subcommand` to act.
 /plan                       Show current plan
 /plan list                  List all plans
 /plan use <name>            Activate an older plan
-/checkpoint [label]          Create a named checkpoint
-/checkpoint list            View all checkpoints
+/checkpoint                 List all checkpoints
+/checkpoint create [label]  Create a named checkpoint
 /rewind                     Rewind to a checkpoint (interactive)
 /rewind last                Quick rewind to most recent checkpoint
 /context                    Show context window usage with per-component breakdown
@@ -481,8 +481,9 @@ Three tiers, all plain markdown you can edit directly:
       history.jsonl                 # conversation history (created on demand)
       results/                     # cached tool results (send-once pattern)
         index.json
-      checkpoints/                 # conversation + file checkpoints
+      checkpoints/                 # checkpoint metadata
         index.json
+      shadow-git/                  # shadow git repo for checkpoint snapshots
       session-state.json           # session resume context
 ```
 
@@ -628,7 +629,7 @@ Tools execute in parallel when the model returns multiple tool calls.
 - Large tool results (>2KB) are cached to disk and replaced with summaries on subsequent turns — the LLM can retrieve full content on demand via `result(action=get)`.
 - Large tool call arguments (file writes, edits) are collapsed after the introduction turn.
 - Turns with 3+ tool calls are automatically summarized; older turns are replaced with summaries in API calls. Tool outputs from older turns are masked to save context (the agent can retrieve them on demand via result refs).
-- Checkpoints are created automatically at each turn start. Use `/rewind` to roll back code, conversation, or both.
+- Checkpoints are created automatically at each turn start using a shadow git repo, capturing all file changes (including those from bash commands). Use `/rewind` to roll back code, conversation, or both.
 - A rolling window of the last 10 user messages is maintained in the system prompt across sessions, so the agent always knows what you asked for.
 - The original user request is preserved through compaction — it always stays in context.
 - At 90% context window usage, ag automatically summarizes older interactions to free space, then injects a context reconstruction message with the active plan and recent files. Use `/context compact` to trigger manually. Only interaction history is compacted — system prompt, tools, skills, memory, and environment are unaffected. Use `/context` to see a per-component breakdown (system prompt, environment, global memory, skill catalog, tool definitions, custom tools, interactions).
@@ -667,7 +668,8 @@ src/
   core/permissions.ts # permission manager with glob pattern matching
   core/results.ts     # result ref cache (send-once for large tool outputs)
   core/summarization.ts # turn summarization (LLM-generated summaries)
-  core/checkpoint.ts  # checkpoint store (file backups + conversation snapshots)
+  core/checkpoint.ts  # checkpoint store (metadata + shadow git integration)
+  core/shadow-git.ts  # shadow git repo for whole-tree snapshots
   memory/memory.ts    # memory, plans, tasks, history, session state
   tools/agent.ts      # sub-agent spawning (in-process, parallel)
   tools/bash.ts       # shell execution + background processes

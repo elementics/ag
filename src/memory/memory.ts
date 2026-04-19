@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync, rmdirSync, rmSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, renameSync, rmdirSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Message } from '../core/types.js';
@@ -414,6 +414,7 @@ export function rewriteHistory(messages: Message[], cwd?: string): void {
 // ── Session state ──────────────────────────────────────────────────────────
 
 export interface SessionState {
+  sessionId: string;
   timestamp: string;
   turnNumber: number;
   summary: string;
@@ -481,9 +482,7 @@ export function clearProject(cwd?: string): void {
   clearContentCache(cwd || process.cwd());
   // Clear result cache, index, and in-memory refs
   clearResultCache(cwd || process.cwd());
-  // Clear checkpoints
-  const checkpointsDir = join(p.projectDir, 'checkpoints');
-  if (existsSync(checkpointsDir)) rmSync(checkpointsDir, { recursive: true });
+  // Checkpoints are cleared by agent.clearProject() via checkpointStore.clear()
   // Clear session state
   if (existsSync(p.sessionState)) unlinkSync(p.sessionState);
 }

@@ -1,11 +1,11 @@
 /**
  * Checkpoint store — snapshot conversation + file state for rewind.
- * File copies (not shadow git) — simple, matches existing storage patterns.
+ * Uses a shadow git repo to capture the full working tree at each checkpoint.
  */
 
-import { readFileSync, writeFileSync, copyFileSync, mkdirSync, existsSync, rmSync, rmdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { ShadowGit } from './shadow-git.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -14,13 +14,9 @@ export interface Checkpoint {
   timestamp: string;
   messageIndex: number;
   turnNumber: number;
+  sessionId: string;
   label?: string;
-  fileBackups: FileBackup[];
-}
-
-export interface FileBackup {
-  originalPath: string;
-  backupPath: string;
+  snapshotSha: string | null;
 }
 
 // ── Locking (same pattern as results.ts / memory.ts) ───────────────────────
@@ -48,106 +44,106 @@ function acquireLock(lockDir: string): void {
 
 // ── CheckpointStore ────────────────────────────────────────────────────────
 
+const MAX_CHECKPOINTS = 20;
+
 export class CheckpointStore {
   private checkpoints: Checkpoint[] = [];
   private nextId = 1;
   private readonly checkpointsDir: string;
   private readonly indexPath: string;
+  private shadowGit: ShadowGit;
 
-  constructor(private projectDir: string) {
+  /** Check if git is available (required for checkpoints). */
+  static isAvailable(): Promise<boolean> {
+    return ShadowGit.isAvailable();
+  }
+
+  constructor(private projectDir: string, private workTree: string) {
     this.checkpointsDir = join(projectDir, 'checkpoints');
     this.indexPath = join(this.checkpointsDir, 'index.json');
+    this.shadowGit = new ShadowGit(join(projectDir, 'shadow-git'), workTree);
     this.load();
   }
 
-  /** Create a new checkpoint */
-  create(messageIndex: number, turnNumber: number, label?: string): Checkpoint {
+  /** Initialize the shadow git repo. Must be called before create/restore. */
+  async init(): Promise<void> {
+    await this.shadowGit.init();
+  }
+
+  /** Create a new checkpoint, snapshotting the current working tree. */
+  async create(messageIndex: number, turnNumber: number, label?: string, sessionId?: string): Promise<Checkpoint> {
     const id = String(this.nextId++);
+    const snapshotSha = await this.shadowGit.snapshot(`checkpoint ${id}: ${label || `turn ${turnNumber}`}`);
+
     const checkpoint: Checkpoint = {
       id,
       timestamp: new Date().toISOString(),
       messageIndex,
       turnNumber,
+      sessionId: sessionId || '',
       label: label || `turn ${turnNumber}`,
-      fileBackups: [],
+      snapshotSha,
     };
     this.checkpoints.push(checkpoint);
-    mkdirSync(join(this.checkpointsDir, id, 'files'), { recursive: true });
     this.save();
+
+    // Prune old checkpoints
+    if (this.checkpoints.length > MAX_CHECKPOINTS) {
+      this.pruneOldest(this.checkpoints.length - MAX_CHECKPOINTS);
+    }
+
     return checkpoint;
   }
 
-  /** Back up a file before it gets modified. Skips if already backed up in this checkpoint. */
-  backupFile(checkpointId: string, filePath: string): void {
+  /** Restore the working tree to the state at the given checkpoint. */
+  async restoreFiles(checkpointId: string): Promise<void> {
     const checkpoint = this.checkpoints.find(cp => cp.id === checkpointId);
-    if (!checkpoint) return;
-
-    // Skip if already backed up in this checkpoint
-    if (checkpoint.fileBackups.some(fb => fb.originalPath === filePath)) return;
-
-    if (!existsSync(filePath)) return;
-
-    const hash = createHash('md5').update(filePath).digest('hex').slice(0, 12);
-    const backupPath = join(this.checkpointsDir, checkpointId, 'files', hash);
-
-    try {
-      copyFileSync(filePath, backupPath);
-      checkpoint.fileBackups.push({ originalPath: filePath, backupPath });
-      this.save();
-    } catch { /* backup failure is non-fatal */ }
+    if (!checkpoint?.snapshotSha) return;
+    await this.shadowGit.restore(checkpoint.snapshotSha);
   }
 
-  /** Restore files from a checkpoint to their original paths */
-  restoreFiles(checkpointId: string): { restored: string[]; failed: string[] } {
-    const checkpoint = this.checkpoints.find(cp => cp.id === checkpointId);
-    if (!checkpoint) return { restored: [], failed: [] };
-
-    const restored: string[] = [];
-    const failed: string[] = [];
-
-    for (const fb of checkpoint.fileBackups) {
-      try {
-        if (existsSync(fb.backupPath)) {
-          // Ensure parent directory exists
-          const dir = fb.originalPath.replace(/\/[^/]+$/, '');
-          if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
-          copyFileSync(fb.backupPath, fb.originalPath);
-          restored.push(fb.originalPath);
-        } else {
-          failed.push(fb.originalPath);
-        }
-      } catch {
-        failed.push(fb.originalPath);
-      }
-    }
-
-    return { restored, failed };
-  }
-
-  /** List all checkpoints, oldest first */
+  /** List all checkpoints, oldest first. */
   list(): Checkpoint[] {
     return [...this.checkpoints];
   }
 
-  /** Get the most recent checkpoint */
+  /** Get the most recent checkpoint. */
   latest(): Checkpoint | undefined {
     return this.checkpoints.length > 0
       ? this.checkpoints[this.checkpoints.length - 1]
       : undefined;
   }
 
-  /** Get a checkpoint by ID */
+  /** Get a checkpoint by ID. */
   get(id: string): Checkpoint | undefined {
     return this.checkpoints.find(cp => cp.id === id);
   }
 
-  /** Remove all checkpoint data */
-  clear(): void {
+  /** Remove checkpoint and all after it (for rewind — the restored checkpoint is consumed). */
+  pruneFrom(checkpointId: string): void {
+    const idx = this.checkpoints.findIndex(cp => cp.id === checkpointId);
+    if (idx < 0) return;
+    this.checkpoints.splice(idx);
+    this.save();
+  }
+
+  /** Remove all checkpoint data and reinitialize the shadow git repo. */
+  async clear(): Promise<void> {
     if (existsSync(this.checkpointsDir)) {
       rmSync(this.checkpointsDir, { recursive: true });
     }
+    const shadowDir = join(this.projectDir, 'shadow-git');
+    if (existsSync(shadowDir)) {
+      rmSync(shadowDir, { recursive: true });
+    }
     this.checkpoints = [];
     this.nextId = 1;
+    await this.shadowGit.init();
+  }
+
+  /** Get the underlying ShadowGit instance (for diff, etc). */
+  getShadowGit(): ShadowGit {
+    return this.shadowGit;
   }
 
   // ── Persistence ──────────────────────────────────────────────────────────
@@ -171,5 +167,12 @@ export class CheckpointStore {
     } finally {
       try { rmdirSync(lockDir); } catch { /* ignore */ }
     }
+  }
+
+  private pruneOldest(count: number): void {
+    this.checkpoints.splice(0, count);
+    this.save();
+    // Let shadow git gc handle object cleanup
+    this.shadowGit.prune(MAX_CHECKPOINTS).catch(() => { /* non-fatal */ });
   }
 }

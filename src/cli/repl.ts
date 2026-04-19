@@ -20,6 +20,21 @@ function formatRelativeTime(ms: number): string {
   return `${d} day${d !== 1 ? 's' : ''} ago`;
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** Format checkpoint timestamp: HH:MM for today, Mon DD HH:MM for older. */
+function formatCheckpointTime(isoTimestamp: string): string {
+  const d = new Date(isoTimestamp);
+  const now = new Date();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const time = `${hh}:${mm}`;
+  if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
+    return time;
+  }
+  return `${MONTHS[d.getMonth()]} ${d.getDate()} ${time}`;
+}
+
 function truncateCommand(command: string, maxLen = 80): string {
   const firstLine = command.split('\n')[0];
   if (firstLine.length <= maxLen) {
@@ -339,7 +354,8 @@ export class REPL {
 
     while (true) {
       try {
-        const input = await this.ask(`${C.green}you>${C.reset} `);
+        const turn = this.agent.getCurrentTurn() + 1;
+        const input = await this.ask(`${C.dim}[turn ${turn}]${C.reset} ${C.green}you>${C.reset} `);
         if (!input.trim()) continue;
         if (input.startsWith('/')) { await this.handleCommand(input); continue; }
         let hitMaxIterations = false;
@@ -610,8 +626,8 @@ export class REPL {
         console.error(`  ${C.cyan}/plan${C.reset}                  Show current plan`);
         console.error(`  ${C.cyan}/plan list${C.reset}             List all plans`);
         console.error(`  ${C.cyan}/plan use <name>${C.reset}       Activate an older plan`);
-        console.error(`  ${C.cyan}/checkpoint [label]${C.reset}    Create a named checkpoint`);
-        console.error(`  ${C.cyan}/checkpoint list${C.reset}       List all checkpoints`);
+        console.error(`  ${C.cyan}/checkpoint${C.reset}             List all checkpoints`);
+        console.error(`  ${C.cyan}/checkpoint create [label]${C.reset}  Create a named checkpoint`);
         console.error(`  ${C.cyan}/rewind${C.reset}                Rewind to a checkpoint`);
         console.error(`  ${C.cyan}/rewind last${C.reset}           Rewind to most recent checkpoint`);
         console.error(`  ${C.cyan}/context${C.reset}               Show context breakdown + usage`);
@@ -700,10 +716,10 @@ export class REPL {
         } else if (subCmd === 'clear') {
           const scope = args[1]?.toLowerCase();
           if (scope === 'project') {
-            this.agent.clearProject();
+            await this.agent.clearProject();
             console.error(`${C.yellow}Project memory, plans, and history cleared.${C.reset}\n`);
           } else if (scope === 'all') {
-            this.agent.clearAll();
+            await this.agent.clearAll();
             console.error(`${C.yellow}All memory cleared.${C.reset}\n`);
           } else {
             console.error(`${C.dim}Usage: /memory clear project  or  /memory clear all${C.reset}\n`);
@@ -755,24 +771,27 @@ export class REPL {
       // ── /checkpoint ──────────────────────────────────────────────────
       case 'checkpoint': {
         const store = this.agent.getCheckpointStore();
-        if (!store) { console.error(`${C.dim}Checkpoints not available.${C.reset}\n`); break; }
+        if (!store) { console.error(`${C.yellow}Checkpoints unavailable — git is required for checkpoint/rewind. Install git to enable this feature.${C.reset}\n`); break; }
 
         const subCmd = args[0]?.toLowerCase();
-        if (subCmd === 'list') {
+        if (subCmd === 'create') {
+          // Manual checkpoint with optional label
+          const label = args.slice(1).join(' ') || undefined;
+          const cp = await store.create(this.agent.getMessages().length, this.agent.getCurrentTurn(), label, this.agent.getSessionId());
+          console.error(`${C.green}Checkpoint #${cp.id} created${label ? `: ${label}` : ''}${C.reset}\n`);
+        } else {
+          // Default: list checkpoints
           const list = store.list();
           if (list.length === 0) { console.error(`${C.dim}No checkpoints yet.${C.reset}\n`); break; }
+          const currentSession = this.agent.getSessionId();
           console.error(`${C.bold}Checkpoints (${list.length}):${C.reset}`);
           list.forEach(cp => {
-            const ts = new Date(cp.timestamp).toLocaleTimeString();
-            const files = cp.fileBackups.length > 0 ? ` (${cp.fileBackups.length} file backup${cp.fileBackups.length > 1 ? 's' : ''})` : '';
-            console.error(`  ${C.cyan}#${cp.id}${C.reset} ${cp.label || `turn ${cp.turnNumber}`} ${C.dim}${ts}${files}${C.reset}`);
+            const ts = formatCheckpointTime(cp.timestamp);
+            const sha = cp.snapshotSha ? `  ${C.dim}${cp.snapshotSha.slice(0, 7)}${C.reset}` : '';
+            const session = cp.sessionId && cp.sessionId !== currentSession ? `  ${C.dim}(${cp.sessionId})${C.reset}` : '';
+            console.error(`  ${C.cyan}#${cp.id}${C.reset} ${cp.label || `turn ${cp.turnNumber}`}  ${C.dim}${ts}${C.reset}${sha}${session}`);
           });
           console.error('');
-        } else {
-          // Manual checkpoint with optional label
-          const label = args.join(' ') || undefined;
-          const cp = store.create(this.agent.getMessages().length, 0, label);
-          console.error(`${C.green}Checkpoint #${cp.id} created${label ? `: ${label}` : ''}${C.reset}\n`);
         }
         break;
       }
@@ -780,7 +799,7 @@ export class REPL {
       // ── /rewind ───────────────────────────────────────────────────────
       case 'rewind': {
         const store = this.agent.getCheckpointStore();
-        if (!store) { console.error(`${C.dim}Checkpoints not available.${C.reset}\n`); break; }
+        if (!store) { console.error(`${C.yellow}Checkpoints unavailable — git is required for checkpoint/rewind. Install git to enable this feature.${C.reset}\n`); break; }
         const list = store.list();
         if (list.length === 0) { console.error(`${C.dim}No checkpoints to rewind to.${C.reset}\n`); break; }
 
@@ -789,15 +808,17 @@ export class REPL {
 
         if (!target) {
           // Show list and ask user to pick
+          const currentSession = this.agent.getSessionId();
           console.error(`${C.bold}Checkpoints:${C.reset}`);
           list.forEach(cp => {
-            const ts = new Date(cp.timestamp).toLocaleTimeString();
-            const files = cp.fileBackups.length > 0 ? ` (${cp.fileBackups.length} files)` : '';
-            console.error(`  ${C.cyan}#${cp.id}${C.reset} ${cp.label || `turn ${cp.turnNumber}`} ${C.dim}${ts}${files}${C.reset}`);
+            const ts = formatCheckpointTime(cp.timestamp);
+            const sha = cp.snapshotSha ? `  ${C.dim}${cp.snapshotSha.slice(0, 7)}${C.reset}` : '';
+            const session = cp.sessionId && cp.sessionId !== currentSession ? `  ${C.dim}(${cp.sessionId})${C.reset}` : '';
+            console.error(`  ${C.cyan}#${cp.id}${C.reset} ${cp.label || `turn ${cp.turnNumber}`}  ${C.dim}${ts}${C.reset}${sha}${session}`);
           });
           console.error('');
           const answer = await new Promise<string>(resolve => {
-            this.rl.question(`${C.yellow}Rewind to checkpoint #: ${C.reset}`, resolve);
+            this.rl.question(`${C.yellow}Rewind to checkpoint # (Enter to cancel): ${C.reset}`, resolve);
           });
           target = store.get(answer.trim());
           if (!target) { console.error(`${C.dim}Cancelled.${C.reset}\n`); break; }
@@ -818,23 +839,23 @@ export class REPL {
         switch (mode.trim()) {
           case '1': {
             await this.agent.getEvents().emit('checkpoint_restore', { ...restoreEvent, mode: 'both' });
-            const result = store.restoreFiles(target.id);
-            this.agent.truncateMessages(target.messageIndex);
-            console.error(`${C.green}Restored ${result.restored.length} file(s) and conversation to checkpoint #${target.id}${C.reset}`);
-            if (result.failed.length) console.error(`${C.yellow}Failed to restore: ${result.failed.join(', ')}${C.reset}`);
+            await store.restoreFiles(target.id);
+            this.agent.truncateMessages(target.messageIndex, target.turnNumber > 0 ? target.turnNumber - 1 : 0);
+            store.pruneFrom(target.id);
+            console.error(`${C.green}Restored code and conversation to checkpoint #${target.id}${C.reset}`);
             break;
           }
           case '2': {
             await this.agent.getEvents().emit('checkpoint_restore', { ...restoreEvent, mode: 'conversation' });
-            this.agent.truncateMessages(target.messageIndex);
+            this.agent.truncateMessages(target.messageIndex, target.turnNumber > 0 ? target.turnNumber - 1 : 0);
+            store.pruneFrom(target.id);
             console.error(`${C.green}Conversation rewound to checkpoint #${target.id}${C.reset}`);
             break;
           }
           case '3': {
             await this.agent.getEvents().emit('checkpoint_restore', { ...restoreEvent, mode: 'code' });
-            const result = store.restoreFiles(target.id);
-            console.error(`${C.green}Restored ${result.restored.length} file(s) from checkpoint #${target.id}${C.reset}`);
-            if (result.failed.length) console.error(`${C.yellow}Failed to restore: ${result.failed.join(', ')}${C.reset}`);
+            await store.restoreFiles(target.id);
+            console.error(`${C.green}Restored code to checkpoint #${target.id}${C.reset}`);
             break;
           }
           default:

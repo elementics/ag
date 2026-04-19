@@ -1,131 +1,137 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { CheckpointStore } from '../checkpoint.js';
 
-const projectDir = `/tmp/__ag_test_checkpoint_${randomBytes(8).toString('hex')}__`;
+const base = `/tmp/__ag_test_checkpoint_${randomBytes(8).toString('hex')}__`;
+const projectDir = join(base, '.ag');
+const workTree = base;
 
 let store: CheckpointStore;
 
-beforeEach(() => {
+beforeEach(async () => {
   mkdirSync(projectDir, { recursive: true });
-  store = new CheckpointStore(projectDir);
+  store = new CheckpointStore(projectDir, workTree);
+  await store.init();
 });
 
 afterEach(() => {
-  if (existsSync(projectDir)) rmSync(projectDir, { recursive: true });
+  if (existsSync(base)) rmSync(base, { recursive: true });
 });
 
 describe('CheckpointStore - create', () => {
-  it('creates checkpoint with correct metadata', () => {
-    const cp = store.create(5, 3, 'before refactor');
+  it('creates checkpoint with correct metadata', async () => {
+    writeFileSync(join(workTree, 'file.txt'), 'content');
+    const cp = await store.create(5, 3, 'before refactor');
     expect(cp.id).toBe('1');
     expect(cp.messageIndex).toBe(5);
     expect(cp.turnNumber).toBe(3);
     expect(cp.label).toBe('before refactor');
-    expect(cp.fileBackups).toEqual([]);
+    expect(cp.snapshotSha).toBeTruthy();
     expect(cp.timestamp).toBeTruthy();
   });
 
-  it('auto-labels with turn number', () => {
-    const cp = store.create(0, 7);
+  it('auto-labels with turn number', async () => {
+    writeFileSync(join(workTree, 'file.txt'), 'content');
+    const cp = await store.create(0, 7);
     expect(cp.label).toBe('turn 7');
   });
 
-  it('increments IDs', () => {
-    const cp1 = store.create(0, 1);
-    const cp2 = store.create(5, 2);
+  it('increments IDs', async () => {
+    writeFileSync(join(workTree, 'a.txt'), 'a');
+    const cp1 = await store.create(0, 1);
+    writeFileSync(join(workTree, 'a.txt'), 'b');
+    const cp2 = await store.create(5, 2);
     expect(cp1.id).toBe('1');
     expect(cp2.id).toBe('2');
   });
 
-  it('stores in checkpoints directory', () => {
-    const cp = store.create(0, 1);
-    expect(existsSync(join(projectDir, 'checkpoints', cp.id, 'files'))).toBe(true);
-  });
-});
-
-describe('CheckpointStore - backupFile', () => {
-  it('copies file content to checkpoint directory', () => {
-    const testFile = join(projectDir, 'test.txt');
-    writeFileSync(testFile, 'original content');
-
-    const cp = store.create(0, 1);
-    store.backupFile(cp.id, testFile);
-
-    expect(cp.fileBackups.length).toBe(1);
-    expect(cp.fileBackups[0].originalPath).toBe(testFile);
-    expect(readFileSync(cp.fileBackups[0].backupPath, 'utf-8')).toBe('original content');
-  });
-
-  it('skips if file already backed up in this checkpoint', () => {
-    const testFile = join(projectDir, 'test.txt');
-    writeFileSync(testFile, 'original');
-
-    const cp = store.create(0, 1);
-    store.backupFile(cp.id, testFile);
-    store.backupFile(cp.id, testFile); // Second call — should skip
-
-    expect(cp.fileBackups.length).toBe(1);
-  });
-
-  it('handles missing source file gracefully', () => {
-    const cp = store.create(0, 1);
-    store.backupFile(cp.id, '/nonexistent/file.txt'); // Should not throw
-    expect(cp.fileBackups.length).toBe(0);
-  });
-
-  it('handles unknown checkpoint ID gracefully', () => {
-    store.backupFile('999', '/some/file.txt'); // Should not throw
+  it('returns null snapshotSha when no files changed', async () => {
+    writeFileSync(join(workTree, 'file.txt'), 'static');
+    await store.create(0, 1);
+    // No changes between checkpoints
+    const cp2 = await store.create(5, 2);
+    expect(cp2.snapshotSha).toBeNull();
   });
 });
 
 describe('CheckpointStore - restoreFiles', () => {
-  it('restores backed up files to original paths', () => {
-    const testFile = join(projectDir, 'restore-test.txt');
-    writeFileSync(testFile, 'original');
+  it('restores modified files', async () => {
+    writeFileSync(join(workTree, 'file.txt'), 'original');
+    const cp = await store.create(0, 1);
 
-    const cp = store.create(0, 1);
-    store.backupFile(cp.id, testFile);
-
-    // Modify the file
-    writeFileSync(testFile, 'modified');
-    expect(readFileSync(testFile, 'utf-8')).toBe('modified');
-
-    // Restore
-    const result = store.restoreFiles(cp.id);
-    expect(result.restored).toEqual([testFile]);
-    expect(result.failed).toEqual([]);
-    expect(readFileSync(testFile, 'utf-8')).toBe('original');
+    writeFileSync(join(workTree, 'file.txt'), 'modified');
+    await store.restoreFiles(cp.id);
+    expect(readFileSync(join(workTree, 'file.txt'), 'utf-8')).toBe('original');
   });
 
-  it('handles missing backup file', () => {
-    const testFile = join(projectDir, 'missing-backup.txt');
-    writeFileSync(testFile, 'content');
+  it('deletes files created after checkpoint', async () => {
+    writeFileSync(join(workTree, 'existing.txt'), 'keep');
+    const cp = await store.create(0, 1);
 
-    const cp = store.create(0, 1);
-    store.backupFile(cp.id, testFile);
-
-    // Delete the backup
-    rmSync(cp.fileBackups[0].backupPath);
-
-    const result = store.restoreFiles(cp.id);
-    expect(result.failed).toEqual([testFile]);
+    writeFileSync(join(workTree, 'new-file.txt'), 'should vanish');
+    await store.restoreFiles(cp.id);
+    expect(existsSync(join(workTree, 'new-file.txt'))).toBe(false);
+    expect(readFileSync(join(workTree, 'existing.txt'), 'utf-8')).toBe('keep');
   });
 
-  it('returns empty for unknown checkpoint', () => {
-    const result = store.restoreFiles('999');
-    expect(result.restored).toEqual([]);
-    expect(result.failed).toEqual([]);
+  it('restores deleted files', async () => {
+    writeFileSync(join(workTree, 'will-delete.txt'), 'restore me');
+    const cp = await store.create(0, 1);
+
+    unlinkSync(join(workTree, 'will-delete.txt'));
+    await store.restoreFiles(cp.id);
+    expect(readFileSync(join(workTree, 'will-delete.txt'), 'utf-8')).toBe('restore me');
+  });
+
+  it('handles unknown checkpoint gracefully', async () => {
+    await store.restoreFiles('999'); // Should not throw
+  });
+
+  it('handles checkpoint with null snapshotSha', async () => {
+    writeFileSync(join(workTree, 'file.txt'), 'static');
+    await store.create(0, 1);
+    const cp2 = await store.create(5, 2); // null sha — no changes
+    await store.restoreFiles(cp2.id); // Should not throw
+  });
+});
+
+describe('CheckpointStore - pruneFrom', () => {
+  it('removes the target checkpoint and all after it', async () => {
+    writeFileSync(join(workTree, 'f.txt'), 'v1');
+    await store.create(0, 1, 'first');
+    writeFileSync(join(workTree, 'f.txt'), 'v2');
+    await store.create(5, 2, 'second');
+    writeFileSync(join(workTree, 'f.txt'), 'v3');
+    await store.create(10, 3, 'third');
+
+    store.pruneFrom('2');
+    const list = store.list();
+    expect(list.length).toBe(1);
+    expect(list[0].label).toBe('first');
+  });
+
+  it('removes the only checkpoint', async () => {
+    writeFileSync(join(workTree, 'f.txt'), 'v1');
+    await store.create(0, 1, 'only');
+    store.pruneFrom('1');
+    expect(store.list().length).toBe(0);
+  });
+
+  it('handles unknown ID gracefully', () => {
+    store.pruneFrom('999'); // Should not throw
   });
 });
 
 describe('CheckpointStore - list', () => {
-  it('returns checkpoints in chronological order', () => {
-    store.create(0, 1, 'first');
-    store.create(5, 2, 'second');
-    store.create(10, 3, 'third');
+  it('returns checkpoints in chronological order', async () => {
+    writeFileSync(join(workTree, 'f.txt'), 'v1');
+    await store.create(0, 1, 'first');
+    writeFileSync(join(workTree, 'f.txt'), 'v2');
+    await store.create(5, 2, 'second');
+    writeFileSync(join(workTree, 'f.txt'), 'v3');
+    await store.create(10, 3, 'third');
 
     const list = store.list();
     expect(list.length).toBe(3);
@@ -139,9 +145,11 @@ describe('CheckpointStore - list', () => {
 });
 
 describe('CheckpointStore - latest', () => {
-  it('returns most recent checkpoint', () => {
-    store.create(0, 1, 'first');
-    store.create(5, 2, 'latest');
+  it('returns most recent checkpoint', async () => {
+    writeFileSync(join(workTree, 'f.txt'), 'v1');
+    await store.create(0, 1, 'first');
+    writeFileSync(join(workTree, 'f.txt'), 'v2');
+    await store.create(5, 2, 'latest');
     expect(store.latest()!.label).toBe('latest');
   });
 
@@ -151,41 +159,49 @@ describe('CheckpointStore - latest', () => {
 });
 
 describe('CheckpointStore - clear', () => {
-  it('removes all checkpoint data', () => {
-    store.create(0, 1);
-    store.create(5, 2);
-    store.clear();
+  it('removes all checkpoint data and reinitializes shadow repo', async () => {
+    writeFileSync(join(workTree, 'f.txt'), 'data');
+    await store.create(0, 1);
+    await store.clear();
 
     expect(store.list()).toEqual([]);
     expect(existsSync(join(projectDir, 'checkpoints'))).toBe(false);
+    // Shadow repo should be reinitialized (exists again)
+    expect(existsSync(join(projectDir, 'shadow-git', 'HEAD'))).toBe(true);
   });
 
-  it('handles missing directory gracefully', () => {
-    store.clear(); // Should not throw on empty store
+  it('handles missing directory gracefully', async () => {
+    await store.clear(); // Should not throw on empty store
+  });
+
+  it('can create checkpoints after clear', async () => {
+    writeFileSync(join(workTree, 'f.txt'), 'before');
+    await store.create(0, 1);
+    await store.clear();
+
+    writeFileSync(join(workTree, 'f.txt'), 'after');
+    const cp = await store.create(0, 1, 'post-clear');
+    expect(cp.snapshotSha).toBeTruthy();
   });
 });
 
 describe('CheckpointStore - persistence', () => {
-  it('persists and restores across instances', () => {
-    const testFile = join(projectDir, 'persist-test.txt');
-    writeFileSync(testFile, 'data');
+  it('persists and restores metadata across instances', async () => {
+    writeFileSync(join(workTree, 'f.txt'), 'data');
+    await store.create(0, 1, 'persisted');
 
-    store.create(0, 1, 'persisted');
-    store.backupFile('1', testFile);
-
-    // Create new instance — should load from disk
-    const store2 = new CheckpointStore(projectDir);
+    const store2 = new CheckpointStore(projectDir, workTree);
     const list = store2.list();
     expect(list.length).toBe(1);
     expect(list[0].label).toBe('persisted');
-    expect(list[0].fileBackups.length).toBe(1);
+    expect(list[0].snapshotSha).toBeTruthy();
   });
 
   it('handles corrupt index gracefully', () => {
     mkdirSync(join(projectDir, 'checkpoints'), { recursive: true });
     writeFileSync(join(projectDir, 'checkpoints', 'index.json'), '{{broken}}');
 
-    const store2 = new CheckpointStore(projectDir); // Should not throw
+    const store2 = new CheckpointStore(projectDir, workTree);
     expect(store2.list()).toEqual([]);
   });
 });
