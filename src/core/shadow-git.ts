@@ -90,7 +90,6 @@ export class ShadowGit {
     await this.git([
       'commit',
       '-m', message,
-      '--author', 'ag-checkpoint <ag-checkpoint@local>',
       '--allow-empty-message',
     ]);
 
@@ -212,6 +211,11 @@ export class ShadowGit {
         GIT_INDEX_FILE: join(this.shadowDir, 'index'),
         // Prevent config leakage
         GIT_CONFIG_NOSYSTEM: '1',
+        // Ensure committer identity exists (CI runners may lack git config)
+        GIT_AUTHOR_NAME: 'ag-checkpoint',
+        GIT_AUTHOR_EMAIL: 'ag-checkpoint@local',
+        GIT_COMMITTER_NAME: 'ag-checkpoint',
+        GIT_COMMITTER_EMAIL: 'ag-checkpoint@local',
       },
     });
     return stdout;
