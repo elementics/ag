@@ -19,12 +19,19 @@ export interface BeforeRequestEvent {
   systemPrompt: string;
   model: string;
   stream: boolean;
+  baseURL?: string;
+  provider?: string;
+  maskedKey?: string;
+  compacted?: boolean;
 }
 
 export interface AfterResponseEvent {
   message: Message;
   usage?: Usage;
   finishReason?: string | null;
+  model?: string;
+  baseURL?: string;
+  provider?: string;
 }
 
 export interface ToolCallEvent {
@@ -67,6 +74,35 @@ export interface CheckpointRestoreEvent {
   cancel?: boolean;
 }
 
+export interface AfterCompactEvent {
+  messagesRemoved: number;
+  newMessageCount: number;
+  summaryPreview: string;
+}
+
+/** Fired after the request body is fully resolved (refs expanded, messages sanitized, tools included) but before fetch. Read-only. */
+export interface RequestReadyEvent {
+  url: string;
+  body: Record<string, unknown>;
+}
+
+// ── Helpers ──
+
+/** Derive the provider name from the model string or base URL. */
+export function deriveProvider(model: string, baseURL: string): string {
+  const slash = model.indexOf('/');
+  if (slash > 0) return model.slice(0, slash);
+  try {
+    const host = new URL(baseURL).hostname;
+    if (host.includes('openai')) return 'openai';
+    if (host.includes('anthropic')) return 'anthropic';
+    if (host.includes('openrouter')) return 'openrouter';
+    return host.split('.')[0];
+  } catch {
+    return 'unknown';
+  }
+}
+
 // ── Event map ──
 
 export type EventMap = {
@@ -80,6 +116,8 @@ export type EventMap = {
   input: InputEvent;
   checkpoint_create: CheckpointCreateEvent;
   checkpoint_restore: CheckpointRestoreEvent;
+  after_compact: AfterCompactEvent;
+  request_ready: RequestReadyEvent;
 };
 
 export type EventName = keyof EventMap;

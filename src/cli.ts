@@ -84,7 +84,7 @@ async function main(): Promise<void> {
     console.log(`Project memory: ${stats.projectMemory ? 'yes' : 'none'}  (${p.projectMemory})`);
     console.log(`Plans:          ${stats.planCount}  (${p.plansDir}/)`);
     console.log(`Content:        ${stats.contentCount}  (${p.contentDir}/)`);
-    console.log(`History:        ${stats.historyLines} messages  (${p.history})`);
+    console.log(`History:        ${stats.historyLines} interactions  (${p.history})`);
     console.log(`Config:         ${configPath()}`);
     process.exit(0);
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { AgentEventEmitter } from '../events.js';
+import { AgentEventEmitter, deriveProvider } from '../events.js';
 import type { TurnStartEvent, ToolCallEvent, InputEvent } from '../events.js';
 
 describe('AgentEventEmitter', () => {
@@ -140,6 +140,88 @@ describe('AgentEventEmitter', () => {
     expect(data.cancel).toBe(true);
   });
 
+  it('before_request carries API metadata fields', async () => {
+    const emitter = new AgentEventEmitter();
+    const handler = vi.fn();
+    emitter.on('before_request', handler);
+
+    const data = {
+      messages: [{ role: 'user' as const, content: 'hi' }],
+      systemPrompt: 'test',
+      model: 'anthropic/claude-sonnet-4.6',
+      stream: true,
+      baseURL: 'https://openrouter.ai/api/v1',
+      provider: 'anthropic',
+      maskedKey: 'sk-o...xF7q',
+      compacted: false,
+    };
+    await emitter.emit('before_request', data);
+    expect(handler).toHaveBeenCalledWith(data);
+    expect(handler.mock.calls[0][0].baseURL).toBe('https://openrouter.ai/api/v1');
+    expect(handler.mock.calls[0][0].provider).toBe('anthropic');
+    expect(handler.mock.calls[0][0].maskedKey).toBe('sk-o...xF7q');
+    expect(handler.mock.calls[0][0].compacted).toBe(false);
+  });
+
+  it('after_response carries API metadata and usage', async () => {
+    const emitter = new AgentEventEmitter();
+    const handler = vi.fn();
+    emitter.on('after_response', handler);
+
+    const data = {
+      message: { role: 'assistant' as const, content: 'hello' },
+      usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+      finishReason: 'stop',
+      model: 'anthropic/claude-sonnet-4.6',
+      baseURL: 'https://openrouter.ai/api/v1',
+      provider: 'anthropic',
+    };
+    await emitter.emit('after_response', data);
+    expect(handler.mock.calls[0][0].model).toBe('anthropic/claude-sonnet-4.6');
+    expect(handler.mock.calls[0][0].baseURL).toBe('https://openrouter.ai/api/v1');
+    expect(handler.mock.calls[0][0].provider).toBe('anthropic');
+    expect(handler.mock.calls[0][0].usage.prompt_tokens).toBe(100);
+    expect(handler.mock.calls[0][0].usage.completion_tokens).toBe(50);
+    expect(handler.mock.calls[0][0].usage.total_tokens).toBe(150);
+  });
+
+  it('after_compact carries compaction details', async () => {
+    const emitter = new AgentEventEmitter();
+    const handler = vi.fn();
+    emitter.on('after_compact', handler);
+
+    const data = {
+      messagesRemoved: 20,
+      newMessageCount: 13,
+      summaryPreview: 'Summary of conversation...',
+    };
+    await emitter.emit('after_compact', data);
+    expect(handler).toHaveBeenCalledWith(data);
+    expect(handler.mock.calls[0][0].messagesRemoved).toBe(20);
+    expect(handler.mock.calls[0][0].newMessageCount).toBe(13);
+  });
+
+  it('request_ready carries url and resolved body', async () => {
+    const emitter = new AgentEventEmitter();
+    const handler = vi.fn();
+    emitter.on('request_ready', handler);
+
+    const data = {
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      body: {
+        model: 'anthropic/claude-sonnet-4.6',
+        messages: [{ role: 'system', content: 'You are helpful.' }, { role: 'user', content: 'hi' }],
+        tools: [{ type: 'function', function: { name: 'bash', description: 'run commands', parameters: {} } }],
+        stream: true,
+      },
+    };
+    await emitter.emit('request_ready', data);
+    expect(handler).toHaveBeenCalledWith(data);
+    expect(handler.mock.calls[0][0].url).toBe('https://openrouter.ai/api/v1/chat/completions');
+    expect(handler.mock.calls[0][0].body.model).toBe('anthropic/claude-sonnet-4.6');
+    expect(handler.mock.calls[0][0].body.tools).toHaveLength(1);
+  });
+
   it('before_request messages can be filtered by handler', async () => {
     const emitter = new AgentEventEmitter();
 
@@ -160,5 +242,27 @@ describe('AgentEventEmitter', () => {
     await emitter.emit('before_request', data);
     expect(data.messages).toHaveLength(2);
     expect(data.messages.every(m => m.role !== 'tool')).toBe(true);
+  });
+});
+
+describe('deriveProvider', () => {
+  it('extracts provider from model string with slash', () => {
+    expect(deriveProvider('anthropic/claude-sonnet-4.6', 'https://openrouter.ai/api/v1')).toBe('anthropic');
+    expect(deriveProvider('openai/gpt-4o', 'https://openrouter.ai/api/v1')).toBe('openai');
+    expect(deriveProvider('google/gemini-pro', 'https://openrouter.ai/api/v1')).toBe('google');
+  });
+
+  it('falls back to baseURL hostname when model has no slash', () => {
+    expect(deriveProvider('gpt-4o', 'https://api.openai.com/v1')).toBe('openai');
+    expect(deriveProvider('claude-3', 'https://api.anthropic.com/v1')).toBe('anthropic');
+    expect(deriveProvider('gpt-4o', 'https://openrouter.ai/api/v1')).toBe('openrouter');
+  });
+
+  it('uses first hostname segment for unknown providers', () => {
+    expect(deriveProvider('local-model', 'https://custom.example.com/v1')).toBe('custom');
+  });
+
+  it('returns unknown for invalid URLs', () => {
+    expect(deriveProvider('model', 'not-a-url')).toBe('unknown');
   });
 });

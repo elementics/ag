@@ -82,8 +82,22 @@ export async function compactMessages(
   const minMessages = COMPACT_HEAD_KEEP + COMPACT_TAIL_KEEP + 4;
   if (messages.length <= minMessages) return null;
 
-  const head = messages.slice(0, COMPACT_HEAD_KEEP);
-  const middle = messages.slice(COMPACT_HEAD_KEEP, -COMPACT_TAIL_KEEP);
+  // Find the first real user message (not synthetic resume/compaction/steer)
+  let headEnd = COMPACT_HEAD_KEEP;
+  for (let i = 0; i < messages.length - COMPACT_TAIL_KEEP; i++) {
+    const m = messages[i];
+    if (m.role === 'user' && !m._steer
+        && typeof m.content === 'string'
+        && !m.content.startsWith('Resuming previous session')
+        && !m.content.startsWith('[Conversation compacted')) {
+      // Ensure this message is included in the head
+      if (i >= headEnd) headEnd = i + 1;
+      break;
+    }
+  }
+
+  const head = messages.slice(0, headEnd);
+  const middle = messages.slice(headEnd, -COMPACT_TAIL_KEEP);
   const tail = messages.slice(-COMPACT_TAIL_KEEP);
 
   let summary: string;

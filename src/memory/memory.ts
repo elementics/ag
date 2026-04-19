@@ -183,7 +183,7 @@ export function cleanupTasks(cwd?: string): void {
   }
 }
 
-export function loadContext(cwd?: string, options?: { skipTasks?: boolean }): string {
+export function loadContext(cwd?: string, options?: { skipTasks?: boolean; messages?: Array<{ role: string; content: unknown; _steer?: boolean }> }): string {
   const cap = (s: string, limit = 4000) => {
     if (s.length <= limit) return s;
     // Truncate at the last newline before the limit to avoid mid-sentence cuts
@@ -222,6 +222,43 @@ export function loadContext(cwd?: string, options?: { skipTasks?: boolean }): st
   const historyPath = paths(cwd).history;
   if (existsSync(historyPath)) {
     parts.push(`<history-file>${historyPath}</history-file>`);
+  }
+
+  // Rolling window of recent user messages from history + live messages (skip synthetic ones)
+  const isRealUserMsg = (role: string, content: unknown, steer?: boolean): content is string =>
+    role === 'user' && !steer
+    && typeof content === 'string'
+    && !content.startsWith('Resuming previous session')
+    && !content.startsWith('[Conversation compacted')
+    && !content.startsWith('[Context reconstructed');
+
+  // Pull from history.jsonl (covers prior sessions)
+  const historyMsgs = readTailLines(paths(cwd).history, 60);
+  const fromHistory: string[] = [];
+  for (const line of historyMsgs) {
+    try {
+      const m = JSON.parse(line);
+      if (isRealUserMsg(m.role, m.content)) fromHistory.push((m.content as string).slice(0, 500));
+    } catch { /* skip corrupt lines */ }
+  }
+
+  // Pull from live messages (current session, may include very recent input not yet in history)
+  const fromLive: string[] = [];
+  if (options?.messages) {
+    for (const m of options.messages) {
+      if (isRealUserMsg(m.role, m.content, m._steer)) fromLive.push((m.content as string).slice(0, 500));
+    }
+  }
+
+  // Merge: history first, then live, deduplicate, take last 10
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const msg of [...fromHistory, ...fromLive]) {
+    if (!seen.has(msg)) { seen.add(msg); merged.push(msg); }
+  }
+  const recent = merged.slice(-10);
+  if (recent.length > 0) {
+    parts.push(`<recent-user-messages>\n${recent.join('\n---\n')}\n</recent-user-messages>`);
   }
 
   return parts.join('\n\n');
@@ -384,8 +421,6 @@ export interface SessionState {
   activePlan: string | null;
 }
 
-const SESSION_STATE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
-
 export function saveSessionState(state: SessionState, cwd?: string): void {
   const p = paths(cwd).sessionState;
   writeFileSync(p, JSON.stringify(state, null, 2) + '\n');
@@ -395,11 +430,7 @@ export function loadSessionState(cwd?: string): SessionState | null {
   const p = paths(cwd).sessionState;
   if (!existsSync(p)) return null;
   try {
-    const data = JSON.parse(readFileSync(p, 'utf-8')) as SessionState;
-    // Skip if stale (> 24h old)
-    const age = Date.now() - new Date(data.timestamp).getTime();
-    if (age > SESSION_STATE_MAX_AGE) return null;
-    return data;
+    return JSON.parse(readFileSync(p, 'utf-8')) as SessionState;
   } catch { return null; }
 }
 
@@ -410,6 +441,7 @@ export interface MemoryStats {
   projectMemory: boolean;
   planCount: number;
   taskCount: number;
+  pendingTaskCount: number;
   historyLines: number;
   contentCount: number;
   resultCount: number;
@@ -420,11 +452,13 @@ export function getStats(cwd?: string): MemoryStats {
   const historyRaw = read(p.history);
   const contentCount = getAllContentRefs().length;
   const resultCount = getAllResultRefs().length;
+  const tasks = loadTasks(cwd);
   return {
     globalMemory: existsSync(p.globalMemory) && read(p.globalMemory).length > 0,
     projectMemory: existsSync(p.projectMemory) && read(p.projectMemory).length > 0,
     planCount: listPlans(cwd).length,
-    taskCount: loadTasks(cwd).length,
+    taskCount: tasks.length,
+    pendingTaskCount: tasks.filter(t => t.status === 'pending').length,
     historyLines: historyRaw ? historyRaw.trim().split('\n').filter(Boolean).length : 0,
     contentCount,
     resultCount,

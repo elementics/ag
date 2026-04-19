@@ -54,6 +54,8 @@ export interface Message {
   tool_call_id?: string;
   /** Internal turn number — used for turn collapsing, stripped before API send and history write */
   _turn?: number;
+  /** Internal flag — marks injected steer messages */
+  _steer?: boolean;
 }
 
 export interface ToolCall {
@@ -127,6 +129,7 @@ export interface Usage {
     cached_tokens?: number;
     cache_write_tokens?: number;
   };
+  cost?: number;  // Provider-reported cost (e.g. OpenRouter)
 }
 
 export interface CLIOptions {

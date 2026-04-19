@@ -226,7 +226,7 @@ export function grepTool(cwd: string): Tool {
     type: 'function',
     function: {
       name: 'grep',
-      description: 'Search code and find files. Prefer this over bash for ALL search operations. Actions: search (find pattern in file contents using regex — use this instead of bash grep/rg), find (locate files by name/glob pattern — use this instead of bash find/ls).',
+      description: 'Search code and find files. Actions: search (find pattern in file contents using regex), find (locate files by name/glob pattern).',
       parameters: {
         type: 'object',
         properties: {

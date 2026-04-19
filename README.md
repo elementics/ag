@@ -93,7 +93,7 @@ All commands follow the pattern: `/noun` to show, `/noun subcommand` to act.
 /checkpoint list            View all checkpoints
 /rewind                     Rewind to a checkpoint (interactive)
 /rewind last                Quick rewind to most recent checkpoint
-/context                    Show context window usage
+/context                    Show context window usage with per-component breakdown
 /context compact            Force context compaction now
 /config                     Show config + file paths
 /config set <k> <v>         Set a config value
@@ -299,18 +299,22 @@ Loaded: global, 3 skill(s), 1 extension(s)
 
 ### Available Events
 
-| Event | When | Mutable? |
-|-------|------|----------|
-| `input` | User message arrives | content, skip |
-| `turn_start` | Top of each iteration | Read-only |
-| `before_request` | Before LLM API call | messages, systemPrompt |
-| `after_response` | After LLM response parsed | message |
-| `tool_call` | Before tool executes | args, block, blockReason |
-| `tool_result` | After tool executes | content, isError |
-| `before_compact` | Before context compaction | cancel, customSummary |
-| `turn_end` | After iteration completes | Read-only |
-| `checkpoint_create` | After checkpoint created | Read-only |
-| `checkpoint_restore` | Before rewind executes | cancel |
+Fields marked † are writable — mutations affect agent behavior.
+
+| Event | All fields | Writable |
+|-------|-----------|---------|
+| `input` | content, skip | content†, skip† |
+| `turn_start` | iteration, maxIterations, messageCount | — |
+| `before_request` | messages, systemPrompt, model, stream, baseURL, provider, maskedKey, compacted | messages†, systemPrompt† |
+| `request_ready` | url, body | — |
+| `after_response` | message, usage, finishReason, model, baseURL, provider | — |
+| `tool_call` | toolName, toolCallId, args, block, blockReason | args†, block†, blockReason† |
+| `tool_result` | toolName, toolCallId, args, content, isError | content†, isError† |
+| `before_compact` | messageCount, cancel, customSummary | cancel†, customSummary† |
+| `after_compact` | messagesRemoved, newMessageCount, summaryPreview | — |
+| `turn_end` | iteration, hadToolCalls, toolCallCount | — |
+| `checkpoint_create` | id, label, messageIndex, turnNumber | — |
+| `checkpoint_restore` | id, mode, cancel | cancel† |
 
 Handlers run sequentially — each handler sees mutations from previous handlers. Use `agent.on(event, handler)` which returns an unsubscribe function. Use `agent.log(message)` for spinner-safe output.
 
@@ -338,6 +342,97 @@ Custom compaction:
 agent.on('before_compact', (event: any) => {
   event.customSummary = 'Working on auth feature. Files: src/auth.ts, src/middleware.ts';
 });
+```
+
+Observe finish reason after each LLM response:
+```typescript
+agent.on('after_response', (event: any) => {
+  if (event.finishReason === 'max_tokens') {
+    agent.log(`[monitor] hit token limit on ${event.model}`);
+  }
+});
+```
+
+Log API metadata on each request:
+```typescript
+agent.on('before_request', (event: any) => {
+  agent.log(`[monitor] → ${event.provider}/${event.model} (compacted: ${event.compacted})`);
+});
+```
+
+Log compaction results:
+```typescript
+agent.on('after_compact', (event: any) => {
+  agent.log(`[compact] removed ${event.messagesRemoved} messages → ${event.newMessageCount} remain`);
+});
+```
+
+## Custom Tools
+
+Drop a `.mjs` file into `~/.ag/tools/` (global) or `.ag/tools/` (project-local) to add a tool the agent can call:
+
+```javascript
+// ~/.ag/tools/notify.mjs
+export default {
+  type: 'function',
+  function: {
+    name: 'notify',
+    description: 'Send a desktop notification',
+    parameters: {
+      type: 'object',
+      properties: { message: { type: 'string', description: 'Notification text' } },
+      required: ['message']
+    }
+  },
+  async execute({ message }) {
+    // call your notification service, run osascript, etc.
+    return `Notified: ${message}`;
+  }
+};
+```
+
+Add `permissionKey` to plug into the permissions system — ag will prompt with `deploy(staging)` or `deploy(production)` as the pattern:
+
+```javascript
+// .ag/tools/deploy.mjs
+export default {
+  type: 'function',
+  function: {
+    name: 'deploy',
+    description: 'Deploy to staging or production',
+    parameters: {
+      type: 'object',
+      properties: { target: { type: 'string', enum: ['staging', 'production'] } },
+      required: ['target']
+    }
+  },
+  permissionKey: { qualifier: 'target' },
+  async execute({ target }) {
+    return `Deployed to ${target}`;
+  }
+};
+```
+
+Or register a tool at runtime from an extension using `agent.addTool()`:
+
+```typescript
+export default function(agent: any) {
+  agent.addTool({
+    type: 'function',
+    function: {
+      name: 'ping',
+      description: 'Ping a host and return latency',
+      parameters: {
+        type: 'object',
+        properties: { host: { type: 'string' } },
+        required: ['host']
+      }
+    },
+    execute: async ({ host }: { host: string }) => {
+      return `pong from ${host}`;
+    }
+  });
+}
 ```
 
 ## Configuration
@@ -532,9 +627,11 @@ Tools execute in parallel when the model returns multiple tool calls.
 - At 200 iterations the REPL asks if you want to continue.
 - Large tool results (>2KB) are cached to disk and replaced with summaries on subsequent turns — the LLM can retrieve full content on demand via `result(action=get)`.
 - Large tool call arguments (file writes, edits) are collapsed after the introduction turn.
-- Turns with 3+ tool calls are automatically summarized; older turns are replaced with summaries in API calls.
+- Turns with 3+ tool calls are automatically summarized; older turns are replaced with summaries in API calls. Tool outputs from older turns are masked to save context (the agent can retrieve them on demand via result refs).
 - Checkpoints are created automatically at each turn start. Use `/rewind` to roll back code, conversation, or both.
-- At 90% context window usage, ag automatically summarizes older conversation messages to free space. Use `/context compact` to trigger manually. Only message history is compacted — system prompt, tools, and skills are unaffected.
+- A rolling window of the last 10 user messages is maintained in the system prompt across sessions, so the agent always knows what you asked for.
+- The original user request is preserved through compaction — it always stays in context.
+- At 90% context window usage, ag automatically summarizes older interactions to free space, then injects a context reconstruction message with the active plan and recent files. Use `/context compact` to trigger manually. Only interaction history is compacted — system prompt, tools, skills, memory, and environment are unaffected. Use `/context` to see a per-component breakdown (system prompt, environment, global memory, skill catalog, tool definitions, custom tools, interactions).
 
 ## When to use something else
 

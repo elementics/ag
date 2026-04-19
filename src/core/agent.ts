@@ -1,5 +1,5 @@
 import { Message, Tool, AgentConfig, StreamChunk, ConfirmToolCall, ContentBlock, ContentRef } from './types.js';
-import { AgentEventEmitter, type EventName, type EventHandler } from './events.js';
+import { AgentEventEmitter, deriveProvider, type EventName, type EventHandler } from './events.js';
 import { discoverExtensions, loadExtensions, type ExtensionMeta } from './extensions.js';
 import { C } from './colors.js';
 import { loadContext, loadHistory, appendHistory, rewriteHistory, getStats, clearProject, clearAll, paths, saveGlobalMemory, saveProjectMemory, savePlan, appendPlan, setActivePlan, getActivePlanName, loadGlobalMemory, loadProjectMemory, loadPlan, loadPlanByName, listPlans, cleanupTasks, saveSessionState, loadSessionState, type MemoryStats } from '../memory/memory.js';
@@ -20,7 +20,7 @@ import { consumeRequestedRefs, resolveContent, getContentRef, restoreContentInde
 import { cacheResult, RESULT_REF_THRESHOLD, consumeRequestedResults, resolveResult, getResultRef, restoreResultIndex, saveResultIndex } from './results.js';
 import { discoverSkills, buildSkillCatalog, getAlwaysOnContent, loadSkillTools, type SkillMeta } from './skills.js';
 import { ContextTracker } from './context.js';
-import { startSpinner, fetchWithRetry, truncateToolResult, raceAll } from './utils.js';
+import { startSpinner, fetchWithRetry, truncateToolResult, raceAll, maskApiKey } from './utils.js';
 import { getEnvironmentContext, isReadOnlyToolCall, getProjectListing, buildRequestBody } from './prompt.js';
 import { compactMessages, COMPACT_THRESHOLD, COMPACT_HEAD_KEEP, COMPACT_TAIL_KEEP } from './compaction.js';
 import { summarizeTurn, extractFileOps, TURN_SUMMARY_THRESHOLD, type TurnSummary } from './summarization.js';
@@ -68,6 +68,7 @@ export class Agent implements SkillHost {
   private turnMessageStartIndex = 0;
   private checkpointStore: CheckpointStore | null = null;
   private currentCheckpointId: string | null = null;
+  private resumedSession: import('../memory/memory.js').SessionState | null = null;
 
   constructor(config: AgentConfig = {}) {
     this.model = config.model || 'anthropic/claude-sonnet-4.6';
@@ -75,64 +76,39 @@ export class Agent implements SkillHost {
     this.apiKey = config.apiKey || process.env.OPENROUTER_API_KEY || '';
     const isDefaultBaseURL = this.baseURL === 'https://openrouter.ai/api/v1';
     if (!this.apiKey && isDefaultBaseURL) throw new Error('No API key. Set OPENROUTER_API_KEY, pass -k, or run `ag` interactively to configure.');
-    this.baseSystemPrompt = config.systemPrompt || `You are ag, a coding agent that completes tasks by calling tools. You work autonomously — never ask the user for information you can find yourself.
+    this.baseSystemPrompt = config.systemPrompt || `You are ag, an autonomous coding agent. You complete tasks by calling tools. Find information yourself — only ask the user when genuinely stuck after investigation.
 
-# Tool use
-- To read files, use file(action=read). Do NOT use bash with cat, head, or tail.
-- To edit files, use file(action=edit). Do NOT use bash with sed or awk.
-- To create files, use file(action=write). Do NOT use bash with echo or heredocs.
-- To search file contents, use grep(action=search). Do NOT use bash with grep or rg.
-- To find files by name/pattern, use grep(action=find). Do NOT use bash with find or ls.
-- To browse directories, use file(action=list). Do NOT use bash with ls or tree.
-- Use bash only for running commands: tests, builds, installs, servers, and system operations.
-- Use git for all version control operations — not bash with git commands.
-- If the user mentions a file vaguely, search for it with grep(action=find) before anything else.
+# Tool routing
+- file(action=read) for reading files, file(action=edit) for editing, file(action=write) for creating, file(action=list) for browsing directories
+- grep(action=search) for searching file contents, grep(action=find) for locating files by name/pattern
+- git for all version control operations
+- bash exclusively for running commands: tests, builds, installs, servers, and system operations
+- If a file is mentioned vaguely, locate it with grep(action=find) first
 
 # Working with code
-- Always read a file before editing it. Never propose changes to code you haven't read.
-- Do not create new files unless necessary — prefer editing existing files.
-- Do what was asked, nothing more. Don't add features, refactor surrounding code, add comments, or make "improvements" beyond the request.
-- Don't add error handling or validation for scenarios that can't happen. Trust internal code.
-- Be careful not to introduce security vulnerabilities (XSS, SQL injection, command injection). If you notice insecure code you wrote, fix it immediately.
+- Read a file before editing it — so you match exact content
+- Prefer editing existing files over creating new ones
+- Do exactly what was asked, nothing more — no extra features, refactoring, comments, or error handling for impossible scenarios
+- Fix security vulnerabilities (XSS, injection) immediately if you introduce them
+- After making changes, verify they work: run tests, check for syntax errors, or start the dev server as appropriate
 
 # Error recovery
-- If a tool fails, diagnose why before switching tactics. Read the error, check your assumptions, try a focused fix.
-- Don't retry the identical action. Don't abandon a viable approach after a single failure either.
-- If file(action=edit) fails with "not found", re-read the file to verify exact content.
-- If bash returns a non-zero exit code, read the stderr output to understand the failure.
-- Ask the user only when genuinely stuck after investigation, not as a first response to friction.
+- Diagnose failures before switching tactics — read errors, check assumptions, try a focused fix
+- On file(action=edit) "not found": re-read the file to verify exact content
+- On bash non-zero exit: read stderr to understand the failure
 
 # Git workflow
-- Read the diff before committing. Write concise commit messages that explain why, not what.
-- Never amend commits or force-push without the user asking.
-- Never commit files that contain secrets (.env, credentials, keys).
+- Read the diff before committing. Commit messages explain why, not what.
+- Amend commits and force-push only when the user asks
+- Exclude secrets (.env, credentials, keys) from commits
 
 # History
-- When the user asks about past conversations or work and you cannot answer from your current context, use history(action=search, query="<keyword>") to search conversation history. This searches user messages, assistant responses, tool calls, file paths, and result summaries.
-- Use history(action=recent) to see the last few conversation entries for broader context.
-- This is a last resort — try answering from your current context and memory first.
+- history(action=search) and history(action=recent) search past conversations — use as a last resort after checking current context and memory
 
 # Output
-- Be concise. Short responses, no filler, no trailing summaries of what you just did.
-- When referencing code, include the file path and relevant context.
-- Only use markdown formatting when it aids clarity.
-- Always follow instructions in <global-memory> — these are persistent user preferences that override defaults.
-
-# Verification
-- After making changes, verify they work: run tests, check for syntax errors, or start the dev server as appropriate.
-- If a task involves multiple steps, verify each step before proceeding to the next.
-
-# Tools available
-- file(read/list/write/edit) — view, browse, create, and edit files
-- grep(find) — locate files by glob · grep(search) — search content by regex
-- bash — run shell commands, tests, installs, builds
-- git — status, branch, commit, push
-- memory(save) — persist facts across sessions (global or project tier)
-- plan — create and manage multi-step task plans
-- web(fetch/search) — fetch pages or search the web
-- task(create/list/update/read/remove/clear) — manage tasks for multi-step work
-- agent(prompt, taskId?, model?) — spawn sub-agents for parallel work. Call multiple times in one response to run concurrently. Always include key findings from sub-agents in your response — the user cannot see tool output in full.
-- skill — activate a skill by name`;
+- Be concise. No filler, no trailing summaries.
+- Include file paths when referencing code.
+- Instructions in <global-memory> are persistent user preferences — always follow them.`;
     this.systemPromptSuffix = config.systemPromptSuffix || '';
     this.silent = config.silent ?? false;
     this.noHistory = config.noHistory ?? false;
@@ -173,6 +149,7 @@ export class Agent implements SkillHost {
     if (!config.noHistory) {
       // Try session state resume first (structured summary), fall back to raw history
       const sessionState = loadSessionState(this.cwd);
+      this.resumedSession = sessionState;
       if (sessionState) {
         this.messages = [{
           role: 'user',
@@ -235,7 +212,7 @@ export class Agent implements SkillHost {
   }
 
   private refreshCache(): void {
-    this.cachedContext = loadContext(this.cwd, { skipTasks: this.noHistory });
+    this.cachedContext = loadContext(this.cwd, { skipTasks: this.noHistory, messages: this.noHistory ? undefined : this.messages });
     this.cachedCatalog = buildSkillCatalog(this.allSkills);
     this.cachedAlwaysOn = getAlwaysOnContent(this.allSkills);
   }
@@ -271,8 +248,9 @@ export class Agent implements SkillHost {
     });
   }
 
-  /** Replace older turn message sequences with their summaries */
+  /** Replace older turn message sequences with their summaries, and mask old tool outputs */
   private collapseOlderTurns(messages: Message[]): Message[] {
+    const MASK_TURN_AGE = 3; // Mask tool results from turns older than currentTurn - N
     const result: Message[] = [];
     let i = 0;
     while (i < messages.length) {
@@ -285,6 +263,18 @@ export class Agent implements SkillHost {
           content: `[Turn ${turn} summary — ${summary.toolCallCount} tool calls collapsed]\n\n${summary.summary}`,
         });
         while (i < messages.length && messages[i]._turn === turn) i++;
+      } else if (turn != null && turn < this.currentTurn - MASK_TURN_AGE && messages[i].role === 'tool') {
+        // Mask old tool outputs from non-summarized turns (transient — only affects API copy)
+        const m = messages[i];
+        // Preserve result_ref pointers if available
+        const resultRef = Array.isArray(m.content)
+          ? (m.content as Array<{ type: string; id?: number; tool_name?: string; summary?: string }>).find(b => b.type === 'result_ref')
+          : null;
+        const hint = resultRef
+          ? `[tool result masked — use result(action=get, ref=${resultRef.id}) to retrieve]`
+          : `[tool result masked]`;
+        result.push({ ...m, content: hint });
+        i++;
       } else {
         result.push(messages[i]);
         i++;
@@ -454,7 +444,7 @@ export class Agent implements SkillHost {
       // ── Inject steer messages before next LLM turn ──
       while (this.steerQueue.length > 0) {
         const steer = this.steerQueue.shift()!;
-        const steerMsg: Message = { role: 'user', content: steer };
+        const steerMsg: Message = { role: 'user', content: steer, _steer: true };
         this.messages.push(steerMsg);
         this.appendToHistory(steerMsg);
         yield { type: 'steer', content: steer };
@@ -467,12 +457,31 @@ export class Agent implements SkillHost {
       yield { type: 'thinking', content: `thinking${iterLabel}` };
 
       // ── before_compact event ──
+      let didCompact = false;
       if (!this.compactionInProgress && this.contextTracker.shouldCompact(COMPACT_THRESHOLD)) {
         const compactEvent = { messageCount: this.messages.length, cancel: false, customSummary: undefined as string | undefined };
         await this.events.emit('before_compact', compactEvent);
         if (!compactEvent.cancel) {
           this.compactionInProgress = true;
-          try { await this.compactConversation(compactEvent.customSummary); }
+          const oldCount = this.messages.length;
+          try {
+            await this.compactConversation(compactEvent.customSummary);
+            didCompact = true;
+            await this.events.emit('after_compact', {
+              messagesRemoved: oldCount - this.messages.length,
+              newMessageCount: this.messages.length,
+              summaryPreview: (typeof this.messages[COMPACT_HEAD_KEEP]?.content === 'string'
+                ? this.messages[COMPACT_HEAD_KEEP].content : '').slice(0, 500),
+            });
+            // Post-compaction context reconstruction: anchor the model on current state
+            const fileOps = extractFileOps(this.messages);
+            const planName = getActivePlanName(this.cwd);
+            const recapParts: string[] = ['[Context reconstructed after compaction]'];
+            if (planName) recapParts.push(`Active plan: ${planName}`);
+            if (fileOps.modified.length > 0) recapParts.push(`Recently modified: ${fileOps.modified.slice(-10).join(', ')}`);
+            if (fileOps.read.length > 0) recapParts.push(`Recently read: ${fileOps.read.slice(-10).join(', ')}`);
+            this.queueSteer(recapParts.join('\n'));
+          }
           catch (e) {
             if (!this.silent) process.stderr.write(`  ${C.dim}Compaction failed: ${e} — falling back to truncation${C.reset}\n`);
             const keep = COMPACT_HEAD_KEEP + COMPACT_TAIL_KEEP;
@@ -491,16 +500,30 @@ export class Agent implements SkillHost {
       }
 
       // ── before_request event ──
-      const reqEvent = { messages: this.messages, systemPrompt: this.systemPrompt, model: this.model, stream: true };
+      const reqEvent = {
+        messages: this.messages,
+        systemPrompt: this.systemPrompt,
+        model: this.model,
+        stream: true,
+        baseURL: this.baseURL,
+        provider: deriveProvider(this.model, this.baseURL),
+        maskedKey: maskApiKey(this.apiKey),
+        compacted: didCompact,
+      };
       await this.events.emit('before_request', reqEvent);
+
+      // ── Build request body and emit request_ready ──
+      const url = `${this.baseURL}/chat/completions`;
+      const requestBody = this.getRequestBody(true, { messages: reqEvent.messages, systemPrompt: reqEvent.systemPrompt });
+      await this.events.emit('request_ready', { url, body: requestBody });
 
       // ── API call with abort signal and retry ──
       let res: Response;
       try {
-        res = await fetchWithRetry(`${this.baseURL}/chat/completions`, {
+        res = await fetchWithRetry(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.apiKey}` },
-          body: JSON.stringify(this.getRequestBody(true, { messages: reqEvent.messages, systemPrompt: reqEvent.systemPrompt })),
+          body: JSON.stringify(requestBody),
           signal
         });
       } catch (e: unknown) {
@@ -546,6 +569,7 @@ export class Agent implements SkillHost {
 
             // Capture usage from any chunk that has it (may coexist with delta)
             if (parsed.usage) usage = parsed.usage;
+            if (parsed.cost != null && usage) usage.cost = parsed.cost;
 
             const choice = parsed.choices?.[0];
             if (choice?.finish_reason) lastFinishReason = choice.finish_reason;
@@ -610,7 +634,14 @@ export class Agent implements SkillHost {
       }
 
       // ── after_response event ──
-      await this.events.emit('after_response', { message: msg, usage: usage ?? undefined, finishReason: lastFinishReason });
+      await this.events.emit('after_response', {
+        message: msg,
+        usage: usage ?? undefined,
+        finishReason: lastFinishReason,
+        model: this.model,
+        baseURL: this.baseURL,
+        provider: deriveProvider(this.model, this.baseURL),
+      });
 
       this.messages.push(msg);
       this.appendToHistory(msg);
@@ -842,6 +873,18 @@ export class Agent implements SkillHost {
     if (projectMem) parts.push({ label: 'Project memory', chars: projectMem.length + '<project-memory>\n\n</project-memory>'.length });
     if (plan) parts.push({ label: 'Plan', chars: plan.length + 50 /* tags + header */ });
 
+    // Recent user messages block (part of cachedContext but tracked separately)
+    const userMsgs = this.messages
+      .filter(m => m.role === 'user' && !m._steer
+        && typeof m.content === 'string'
+        && !(m.content as string).startsWith('Resuming previous session')
+        && !(m.content as string).startsWith('[Conversation compacted'))
+      .slice(-10);
+    if (userMsgs.length > 0) {
+      const umChars = userMsgs.reduce((sum, m) => sum + Math.min((m.content as string).length, 500), 0) + 50;
+      parts.push({ label: 'User messages', chars: umChars });
+    }
+
     if (this.cachedCatalog) parts.push({ label: 'Skill catalog', chars: this.cachedCatalog.length });
     if (this.cachedAlwaysOn) parts.push({ label: 'Always-on skills', chars: this.cachedAlwaysOn.length });
     if (this.activeSkillContent.length > 0) {
@@ -877,7 +920,7 @@ export class Agent implements SkillHost {
       if (m.tool_calls) size += JSON.stringify(m.tool_calls).length;
       return sum + size;
     }, 0);
-    if (msgChars > 0) parts.push({ label: 'Messages', chars: msgChars });
+    if (msgChars > 0) parts.push({ label: 'Interactions', chars: msgChars });
     if (contentChars > 0) parts.push({ label: 'Content', chars: contentChars });
 
     return parts;
@@ -934,6 +977,7 @@ export class Agent implements SkillHost {
   refreshSkills(): void { this.allSkills = discoverSkills(this.cwd); this.refreshCache(); }
 
   getStats(): MemoryStats { return getStats(this.cwd); }
+  getResumedSession(): import('../memory/memory.js').SessionState | null { return this.resumedSession; }
   getPaths() { return paths(this.cwd); }
 
   getGlobalMemory(): string { return loadGlobalMemory(this.cwd); }

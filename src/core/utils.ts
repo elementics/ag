@@ -90,6 +90,14 @@ export async function* raceAll<T>(promises: Promise<T>[]): AsyncGenerator<T> {
   }
 }
 
+// ── API key masking ────────────────────────────────────────────────────────
+
+/** Mask an API key for safe logging — shows first 4 and last 4 chars only. */
+export function maskApiKey(key: string): string {
+  if (!key || key.length < 12) return '****';
+  return `${key.slice(0, 4)}...${key.slice(-4)}`;
+}
+
 // ── Prompt serialization ────────────────────────────────────────────────────
 
 let _lockChain: Promise<void> = Promise.resolve();

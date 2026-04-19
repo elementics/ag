@@ -9,6 +9,17 @@ import { PermissionManager, inferPattern } from '../core/permissions.js';
 import type { ConfirmToolCall, PermissionKey, ContentBlock, ContentRef } from '../core/types.js';
 import { ingestContent, describeContent, displayContent, getAllContentRefs } from '../core/content.js';
 
+function formatRelativeTime(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} minute${m !== 1 ? 's' : ''} ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} hour${h !== 1 ? 's' : ''} ago`;
+  const d = Math.floor(h / 24);
+  return `${d} day${d !== 1 ? 's' : ''} ago`;
+}
+
 function truncateCommand(command: string, maxLen = 80): string {
   const firstLine = command.split('\n')[0];
   if (firstLine.length <= maxLen) {
@@ -280,13 +291,8 @@ export class REPL {
       const reason = f.reason.split('\n')[0].slice(0, 60) + (f.reason.length > 60 ? '...' : '');
       console.error(`  ${C.red}−${C.reset} ${C.cyan}${label}${C.reset}  ${C.red}${reason}${C.reset}`);
     }
-    const activePlan = this.agent.getActivePlanName();
-    if (activePlan) {
-      const label = activePlan.replace(/^\d{4}-\d{2}-\d{2}T[\d-]+-?/, '').replace(/-/g, ' ').trim() || activePlan;
-      console.error(`${C.dim}Plan: ${label}${C.reset}`);
-    }
     if (stats.historyLines > 0) {
-      console.error(`${C.dim}History: ${stats.historyLines} messages${C.reset}`);
+      console.error(`${C.dim}History: ${stats.historyLines} interactions${C.reset}`);
     }
     // Resolve context window size
     const tracker = this.agent.getContextTracker();
@@ -296,6 +302,9 @@ export class REPL {
         const exact = models.find(m => m.id === this.agent.getModel());
         const match = exact ?? models[0];
         if (match?.context_length) tracker.setContextLength(match.context_length);
+        if (match?.pricing?.prompt && match?.pricing?.completion) {
+          tracker.setPricing(parseFloat(match.pricing.prompt), parseFloat(match.pricing.completion));
+        }
       } catch { /* proceed without — fallback handled by tracker */ }
     }
     tracker.estimateFromChars(this.agent.getTotalContextChars());
@@ -303,6 +312,26 @@ export class REPL {
 
     console.error(`${C.dim}Commands: /help${C.reset}`);
     if (ctxLine) console.error(ctxLine);
+    const startupSession = tracker.formatSession();
+    if (startupSession) console.error(startupSession);
+
+    const resumedSession = this.agent.getResumedSession();
+    if (resumedSession) {
+      const ageMs = Date.now() - new Date(resumedSession.timestamp).getTime();
+      const ageStr = formatRelativeTime(ageMs);
+      const pending = stats.pendingTaskCount;
+      const taskStr = pending > 0 ? ` — ${pending} task${pending !== 1 ? 's' : ''} pending` : '';
+      console.error('');
+      console.error(`Resumed session (${ageStr})${taskStr}`);
+      const activePlanName = this.agent.getActivePlanName();
+      if (activePlanName) {
+        const plans = this.agent.getPlans();
+        const activePlanEntry = plans.find(p => p.name === activePlanName);
+        if (activePlanEntry) {
+          console.error(`  ${C.green}>${C.reset} ${activePlanEntry.name}  ${C.dim}${activePlanEntry.path}${C.reset}`);
+        }
+      }
+    }
     console.error('');
 
     // Enable keypress events on stdin for interrupt detection
@@ -554,6 +583,8 @@ export class REPL {
         if (!tracker.getUsedTokens()) tracker.estimateFromChars(this.agent.getTotalContextChars());
         const ctx = this.agent.getContextUsage();
         if (ctx) console.error(ctx);
+        const sessionLine = tracker.formatSession();
+        if (sessionLine) console.error(sessionLine);
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : String(error);
         console.error(`${C.red}Error: ${msg}${C.reset}\n`);
@@ -633,20 +664,23 @@ export class REPL {
         } else if (args[0]) {
           this.agent.setModel(args.join('/'));
           saveConfig({ model: this.agent.getModel() });
-          // Resolve context window for new model
+          // Resolve context window and pricing for new model
           const tracker = this.agent.getContextTracker();
-          if (!tracker.getContextLength()) {
-            try {
-              const models = await this.agent.fetchModels(this.agent.getModel());
-              const exact = models.find(m => m.id === this.agent.getModel());
-              const match = exact ?? models[0];
-              if (match?.context_length) tracker.setContextLength(match.context_length);
-            } catch { /* proceed without */ }
-          }
+          try {
+            const models = await this.agent.fetchModels(this.agent.getModel());
+            const exact = models.find(m => m.id === this.agent.getModel());
+            const match = exact ?? models[0];
+            if (match?.context_length && !tracker.getContextLength()) tracker.setContextLength(match.context_length);
+            if (match?.pricing?.prompt && match?.pricing?.completion) {
+              tracker.setPricing(parseFloat(match.pricing.prompt), parseFloat(match.pricing.completion));
+            }
+          } catch { /* proceed without */ }
           tracker.estimateFromChars(this.agent.getTotalContextChars());
           const ctxLine = this.agent.getContextUsage();
           console.error(`${C.yellow}Model set to: ${this.agent.getModel()} (saved)${C.reset}`);
           if (ctxLine) console.error(ctxLine);
+          const sessionLine = tracker.formatSession();
+          if (sessionLine) console.error(sessionLine);
           console.error('');
         } else {
           console.error(`${C.dim}Current model: ${this.agent.getModel()}${C.reset}\n`);
@@ -686,7 +720,7 @@ export class REPL {
           console.error(`  Tasks:   ${C.cyan}${stats.taskCount}${C.reset}`);
           console.error(`  Content: ${C.cyan}${stats.contentCount}${C.reset}`);
           console.error(`  Results: ${C.cyan}${stats.resultCount}${C.reset}`);
-          console.error(`  History: ${C.cyan}${stats.historyLines}${C.reset} messages`);
+          console.error(`  History: ${C.cyan}${stats.historyLines}${C.reset} interactions`);
           if (global) console.error(`\n${C.bold}Global:${C.reset}\n${renderMarkdown(global)}`);
           if (project) console.error(`\n${C.bold}Project:${C.reset}\n${renderMarkdown(project)}`);
           console.error('');
@@ -824,6 +858,8 @@ export class REPL {
             console.error(`${C.green}Compaction complete.${C.reset}`);
             const ctx = this.agent.getContextUsage();
             if (ctx) console.error(ctx);
+            const sessionLine = tracker.formatSession();
+            if (sessionLine) console.error(sessionLine);
           } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
             console.error(`${C.red}Compaction failed: ${msg}${C.reset}`);

@@ -186,7 +186,7 @@ export function fileTool(cwd: string): Tool {
     type: 'function',
     function: {
       name: 'file',
-      description: 'Read, list, write, and edit files. Prefer this over bash for ALL file operations. Actions: read (view with line numbers — always read before editing), list (directory tree), write (create/overwrite file), edit (find-and-replace in existing file — old_string must match exactly once).',
+      description: 'Read, list, write, and edit files. Actions: read (view with line numbers), list (directory tree), write (create/overwrite file), edit (find-and-replace in existing file — old_string must match exactly once).',
       parameters: {
         type: 'object',
         properties: {

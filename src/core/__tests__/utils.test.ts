@@ -1,6 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { maskApiKey } from '../utils.js';
+
+// ── maskApiKey ─────────────────────────────────────────────────────────────
+
+describe('maskApiKey', () => {
+  it('masks a normal key showing first 4 and last 4 chars', () => {
+    expect(maskApiKey('sk-or-v1-abc123def456ghi789')).toBe('sk-o...i789');
+  });
+
+  it('fully masks a short key (< 12 chars)', () => {
+    expect(maskApiKey('short-key')).toBe('****');
+  });
+
+  it('fully masks an empty string', () => {
+    expect(maskApiKey('')).toBe('****');
+  });
+
+  it('masks a key of exactly 12 chars', () => {
+    expect(maskApiKey('123456789012')).toBe('1234...9012');
+  });
+});
 
 // ── Structural tests ───────────────────────────────────────────────────────
 

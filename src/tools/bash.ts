@@ -189,7 +189,7 @@ export function bashToolFactory(cwd: string): Tool {
     type: 'function',
     function: {
       name: 'bash',
-      description: 'Run a shell command in the project directory. Use ONLY for: running tests, builds, installs, servers, and system operations. Do NOT use bash for: reading files (use file tool), editing files (use file tool), searching code (use grep tool), finding files (use grep tool), listing directories (use file tool), or git operations (use git tool). Dangerous commands like rm -rf, sudo rm, and pipe-to-shell are blocked. For long-running processes (dev servers, watchers), set background=true — returns PID immediately. Check output with action="output" pid=PID. Stop with action="kill" pid=PID.',
+      description: 'Run a shell command in the project directory. For tests, builds, installs, servers, and system operations. Dangerous commands (rm -rf, sudo rm, pipe-to-shell) are blocked. For long-running processes (dev servers, watchers), set background=true — returns PID immediately. Check output with action="output" pid=PID. Stop with action="kill" pid=PID.',
       parameters: {
         type: 'object',
         properties: {

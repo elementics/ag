@@ -28,6 +28,16 @@ export class ContextTracker {
   private estimated = false;
   private estimatedTokens = 0;
 
+  // Cumulative session totals
+  private cumPromptTokens = 0;
+  private cumCompletionTokens = 0;
+  private cumCachedTokens = 0;
+  private cumResponseCost = 0;
+
+  // Pricing rates for calculated cost fallback (cost per token)
+  private promptCostPerToken: number | null = null;
+  private completionCostPerToken: number | null = null;
+
   constructor(modelId: string) {
     // Try exact match, then prefix match for variants like model:beta
     this.contextLength = KNOWN_CONTEXT[modelId]
@@ -41,6 +51,15 @@ export class ContextTracker {
   update(usage: Usage): void {
     this.lastUsage = usage;
     this.estimated = false;
+    this.cumPromptTokens += usage.prompt_tokens;
+    this.cumCompletionTokens += usage.completion_tokens;
+    this.cumCachedTokens += usage.prompt_tokens_details?.cached_tokens ?? 0;
+    if (usage.cost != null) this.cumResponseCost += usage.cost;
+  }
+
+  setPricing(promptPerToken: number, completionPerToken: number): void {
+    this.promptCostPerToken = promptPerToken;
+    this.completionCostPerToken = completionPerToken;
   }
 
   estimateFromChars(chars: number): void {
@@ -94,6 +113,31 @@ export class ContextTracker {
     return line;
   }
 
+  private getSessionCost(): number | null {
+    if (this.cumResponseCost > 0) return this.cumResponseCost;
+    if (this.promptCostPerToken !== null && this.completionCostPerToken !== null) {
+      return this.cumPromptTokens * this.promptCostPerToken
+           + this.cumCompletionTokens * this.completionCostPerToken;
+    }
+    return null;
+  }
+
+  private formatCost(cost: number): string {
+    return cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2);
+  }
+
+  formatSession(): string {
+    if (this.cumPromptTokens === 0 && this.cumCompletionTokens === 0) return '';
+
+    let line = `${C.dim}↑${formatTokens(this.cumPromptTokens)} | ↓${formatTokens(this.cumCompletionTokens)}${C.reset}`;
+
+    const cost = this.getSessionCost();
+    if (cost !== null && cost > 0) {
+      line += `${C.dim} | ${C.reset}${C.green}$${this.formatCost(cost)}${C.reset}`;
+    }
+    return line;
+  }
+
   formatDetailed(): string {
     const max = this.contextLength;
     const parts: string[] = [];
@@ -127,6 +171,20 @@ export class ContextTracker {
       parts.push(`  Window:     ${color}${formatTokens(used)}/${formatTokens(max)} (${pct}%)${C.reset}`);
     } else {
       parts.push(`  Window:     ${C.dim}unknown (model context length not resolved)${C.reset}`);
+    }
+
+    if (this.cumPromptTokens > 0 || this.cumCompletionTokens > 0) {
+      parts.push('');
+      parts.push(`  ${C.bold}Session totals${C.reset}`);
+      parts.push(`  Prompt:     ${C.cyan}${formatTokens(this.cumPromptTokens)}${C.reset} tokens`);
+      parts.push(`  Completion: ${C.cyan}${formatTokens(this.cumCompletionTokens)}${C.reset} tokens`);
+      if (this.cumCachedTokens > 0) {
+        parts.push(`  Cached:     ${C.green}${formatTokens(this.cumCachedTokens)}${C.reset} tokens`);
+      }
+      const cost = this.getSessionCost();
+      if (cost !== null && cost > 0) {
+        parts.push(`  Cost:       ${C.green}$${this.formatCost(cost)}${C.reset}`);
+      }
     }
 
     return parts.join('\n');
