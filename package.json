@@ -1,6 +1,6 @@
 {
   "name": "@elementics/ag",
-  "version": "4.6.4",
+  "version": "4.7.0",
   "description": "Persistent AI coding agent with memory - any model via OpenRouter",
   "type": "module",
   "bin": {
