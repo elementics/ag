@@ -14,6 +14,19 @@ export interface PersistentConfig {
   contextLength?: number;
 }
 
+export const CONFIG_KEYS: readonly (keyof PersistentConfig)[] = [
+  'apiKey', 'model', 'baseURL', 'systemPrompt', 'maxIterations',
+  'tavilyApiKey', 'autoApprove', 'contextLength',
+];
+
+export const CONFIG_KEY_ALIASES: Readonly<Record<string, keyof PersistentConfig>> = {
+  'tavily_api_key': 'tavilyApiKey',
+  'openrouter_api_key': 'apiKey',
+  'api_key': 'apiKey',
+  'auto_approve': 'autoApprove',
+  'autoapprove': 'autoApprove',
+};
+
 export function configPath(): string {
   return CONFIG_PATH;
 }

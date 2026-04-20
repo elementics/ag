@@ -1,13 +1,14 @@
 import { createInterface, Interface, emitKeypressEvents } from 'node:readline';
 import { Agent } from '../core/agent.js';
 import { promptInput, setBeforePromptHook } from '../core/utils.js';
-import { loadConfig, saveConfig, configPath, PersistentConfig } from '../core/config.js';
+import { loadConfig, saveConfig, configPath, PersistentConfig, CONFIG_KEYS, CONFIG_KEY_ALIASES } from '../core/config.js';
 import { searchRegistry, installSkill, removeSkill, formatInstalls } from '../core/registry.js';
 import { C, renderMarkdown } from '../core/colors.js';
 import { VERSION } from '../core/version.js';
 import { PermissionManager, inferPattern } from '../core/permissions.js';
 import type { ConfirmToolCall, PermissionKey, ContentBlock, ContentRef } from '../core/types.js';
 import { ingestContent, describeContent, displayContent, getAllContentRefs } from '../core/content.js';
+import { readLine, createCompletionEngine, type CompletionEngine } from './editor/index.js';
 
 function formatRelativeTime(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -248,6 +249,7 @@ export class REPL {
   private readonly pm: PermissionManager | null;
   private confirmCb: ReturnType<typeof createPermissionCallback> | null;
   private pendingContentRefs: ContentRef[] = [];
+  private completionEngine: CompletionEngine | null = null;
 
   constructor(agent: Agent, pm?: PermissionManager, confirmCb?: ReturnType<typeof createPermissionCallback>) {
     this.agent = agent;
@@ -351,6 +353,9 @@ export class REPL {
 
     // Enable keypress events on stdin for interrupt detection
     if (process.stdin.isTTY) emitKeypressEvents(process.stdin);
+
+    // Initialize tab completion engine
+    this.completionEngine = createCompletionEngine(this.agent);
 
     while (true) {
       try {
@@ -900,14 +905,8 @@ export class REPL {
 
       // ── /config ───────────────────────────────────────────────────────
       case 'config': {
-        const validKeys: (keyof PersistentConfig)[] = ['apiKey', 'model', 'baseURL', 'systemPrompt', 'maxIterations', 'tavilyApiKey', 'autoApprove', 'contextLength'];
-        const keyAliases: Record<string, keyof PersistentConfig> = {
-          'tavily_api_key': 'tavilyApiKey',
-          'openrouter_api_key': 'apiKey',
-          'api_key': 'apiKey',
-          'auto_approve': 'autoApprove',
-          'autoapprove': 'autoApprove',
-        };
+        const validKeys = CONFIG_KEYS;
+        const keyAliases = CONFIG_KEY_ALIASES;
         if (args[0]?.toLowerCase() === 'set' && args[1]) {
           const value = args.slice(2).join(' ');
           if (!value) { console.error(`${C.red}Usage: /config set <key> <value>${C.reset}\n`); break; }
@@ -944,6 +943,7 @@ export class REPL {
           if (key === 'apiKey') this.agent.setApiKey(parsed as string);
           if (key === 'baseURL') this.agent.setBaseURL(parsed as string);
           if (key === 'contextLength') this.agent.getContextTracker().setContextLength(parsed as number);
+          if (key === 'apiKey' || key === 'baseURL') this.completionEngine?.invalidateModelCache();
           const display = (key === 'apiKey' || key === 'tavilyApiKey') ? maskKey(value) : value;
           console.error(`${C.yellow}Config: ${key} = ${display} (saved)${C.reset}\n`);
         } else if (args[0]?.toLowerCase() === 'unset' && args[1]) {
@@ -1232,7 +1232,27 @@ export class REPL {
     }
   }
 
-  private ask(prompt: string): Promise<string> {
+  private async ask(prompt: string): Promise<string> {
+    if (process.stdin.isTTY) {
+      this.rl.pause();
+      // Save and remove readline's internal data listeners — they conflict with raw mode
+      const savedDataListeners = process.stdin.rawListeners('data');
+      process.stdin.removeAllListeners('data');
+      try {
+        const result = await readLine(prompt, this.completionEngine);
+        return result.text;
+      } finally {
+        if (process.stdin.isTTY && (process.stdin as any).isRaw) {
+          process.stdin.setRawMode(false);
+        }
+        // Restore readline's data listeners before resuming
+        for (const listener of savedDataListeners) {
+          process.stdin.on('data', listener as (...args: unknown[]) => void);
+        }
+        this.rl.resume();
+      }
+    }
+    // Non-TTY fallback (piped input)
     return new Promise(resolve => this.rl.question(prompt, resolve));
   }
 }

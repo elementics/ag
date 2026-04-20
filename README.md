@@ -73,6 +73,46 @@ you> build an API with auth
 
 Steer messages are queued and injected before the next LLM call — current tool calls are not interrupted.
 
+## Prompt Editing
+
+The `you>` prompt has built-in line editing, tab completion, and paste handling.
+
+### Keyboard Shortcuts
+
+| Key | Effect |
+|-----|--------|
+| Tab | Complete commands, config keys, models, file paths |
+| Ctrl+C | Exit |
+| Ctrl+U | Clear line |
+| Ctrl+W | Delete word backward |
+| Left/Right | Move cursor (paste pills skip as one unit) |
+| Home/Ctrl+A | Jump to start |
+| End/Ctrl+E | Jump to end |
+
+### Tab Completion
+
+Tab completes in priority order:
+
+```
+/mo         → /model                    (slash commands)
+/config s   → /config set               (subcommands)
+/config set ba → /config set baseURL    (config keys)
+/model cla  → claude-sonnet-4-6         (model names, cached)
+src/cli/re  → src/cli/repl.ts           (file paths)
+```
+
+Single match completes inline. Multiple matches show a candidate row; press Tab again to cycle.
+
+### Paste Pills
+
+Pasting long text (>= 200 characters or >= 3 lines) shows a compact pill instead of inline text:
+
+```
+you> [Pasted 18 lines]
+```
+
+The real content is sent when you press Enter. Backspace deletes the whole pill. You can type before or after a pill on the same prompt line.
+
 ## REPL Commands
 
 All commands follow the pattern: `/noun` to show, `/noun subcommand` to act.
