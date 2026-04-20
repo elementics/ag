@@ -53,11 +53,12 @@ export OPENROUTER_API_KEY=sk-or-v1-...
 
 ## Steering
 
-Press **Tab** while the agent is working to course-correct without aborting. This opens a `steer>` prompt with full editing support (backspace, arrow keys, paste). Output is buffered while you type.
+Press **Tab** while the agent is working to course-correct without aborting. This opens a `steer>` prompt with full editing support — paste pills, Ctrl+U/W, and all the same keyboard shortcuts as the main prompt. Output is buffered while you type.
 
 - **Tab** — opens steer prompt, pauses output
-- **Enter** — submits the steer message and resumes. The LLM sees it on the next turn.
-- **Escape** — aborts everything (destructive, same as before)
+- **Enter** — submits the steer message and resumes
+- **Escape** — aborts everything (destructive)
+- **Ctrl+C** — cancels the steer without aborting
 
 ```
 you> build an API with auth
@@ -71,17 +72,18 @@ you> build an API with auth
   ⠧ thinking [2/200]                      ← LLM adjusts
 ```
 
-Steer messages are queued and injected before the next LLM call — current tool calls are not interrupted.
+Steer messages are injected before the next LLM call. If the agent has already finished its response, the response is discarded and re-requested with your correction applied.
 
 ## Prompt Editing
 
-The `you>` prompt has built-in line editing, tab completion, and paste handling.
+The `you>` prompt has built-in line editing, tab completion, and paste handling. A status footer shows model, context usage, token counts, cost, and turn number while the prompt is active.
 
 ### Keyboard Shortcuts
 
 | Key | Effect |
 |-----|--------|
 | Tab | Complete commands, config keys, models, file paths |
+| Shift+Tab | Cycle completion backward |
 | Ctrl+C | Exit |
 | Ctrl+U | Clear line |
 | Ctrl+W | Delete word backward |
@@ -101,7 +103,7 @@ Tab completes in priority order:
 src/cli/re  → src/cli/repl.ts           (file paths)
 ```
 
-Single match completes inline. Multiple matches show a candidate row; press Tab again to cycle.
+Single match completes inline. Multiple matches show a candidate row; press Tab to cycle forward, Shift+Tab to cycle backward.
 
 ### Paste Pills
 
@@ -112,6 +114,16 @@ you> [Pasted 18 lines]
 ```
 
 The real content is sent when you press Enter. Backspace deletes the whole pill. You can type before or after a pill on the same prompt line.
+
+### Status Footer
+
+While the prompt is active, a footer shows at the bottom of the terminal:
+
+```
+claude-sonnet-4-6 │ ██░░░░ 12% │ ↑3.2K ↓1.1K │ $0.04 │ turn 3
+```
+
+The footer disappears when you press Enter. Use `/context` for a detailed breakdown.
 
 ## REPL Commands
 

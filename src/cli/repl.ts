@@ -1016,7 +1016,8 @@ export class REPL {
               console.error(`  ${C.cyan}${s.source}@${s.skillId}${C.reset}  ${C.dim}${formatInstalls(s.installs)} installs${C.reset}`);
             }
             if (results.length > 20) console.error(`${C.dim}  ...and ${results.length - 20} more${C.reset}`);
-            console.error(`${C.dim}  Use /skill add <source>@<name> to install${C.reset}\n`);
+            this.completionEngine?.setSkillSearchCache(results);
+            console.error(`${C.dim}  Use /skill add <source>@<name> to install (Tab completes)${C.reset}\n`);
           } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
             console.error(`${C.red}Error: ${msg}${C.reset}\n`);

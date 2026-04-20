@@ -88,6 +88,7 @@ function completeFilePath(token: string): CompletionCandidate[] {
 export function createCompletionEngine(agent: Agent): CompletionEngine {
   let modelCache: CompletionCandidate[] | null = null;
   let modelFetchPromise: Promise<void> | null = null;
+  let skillSearchCache: CompletionCandidate[] | null = null;
 
   const allConfigKeys = [
     ...CONFIG_KEYS,
@@ -144,7 +145,22 @@ export function createCompletionEngine(agent: Agent): CompletionEngine {
       return []; // cache not ready yet
     }
 
-    // 5. File paths: when token looks path-like
+    // 5. Skill add: /skill add partial — from cached search results
+    const skillAddMatch = textBeforeCursor.match(/^\/skill\s+add\s+(\S*)$/i);
+    if (skillAddMatch && skillSearchCache) {
+      const partial = skillAddMatch[1].toLowerCase();
+      return skillSearchCache.filter(c => c.text.toLowerCase().includes(partial));
+    }
+
+    // 6. Skill remove: /skill remove partial — from installed skills
+    const skillRemoveMatch = textBeforeCursor.match(/^\/skill\s+remove\s+(\S*)$/i);
+    if (skillRemoveMatch) {
+      const partial = skillRemoveMatch[1].toLowerCase();
+      const installed = agent.getSkills().map(s => ({ text: s.name, display: s.name }));
+      return installed.filter(c => c.text.toLowerCase().includes(partial));
+    }
+
+    // 7. File paths: when token looks path-like
     const tokenMatch = textBeforeCursor.match(/(\S+)$/);
     if (tokenMatch) {
       const token = tokenMatch[1];
@@ -164,6 +180,12 @@ export function createCompletionEngine(agent: Agent): CompletionEngine {
     invalidateModelCache() {
       modelCache = null;
       modelFetchPromise = null;
+    },
+    setSkillSearchCache(results: Array<{ source: string; skillId: string }>) {
+      skillSearchCache = results.map(r => {
+        const id = `${r.source}@${r.skillId}`;
+        return { text: id, display: id };
+      });
     },
     /** Await the in-flight model fetch (for tests). */
     _waitForModelFetch(): Promise<void> {

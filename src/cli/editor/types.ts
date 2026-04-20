@@ -48,6 +48,7 @@ export interface CompletionState {
 export interface CompletionEngine {
   complete(textBeforeCursor: string): CompletionCandidate[] | Promise<CompletionCandidate[]>;
   invalidateModelCache(): void;
+  setSkillSearchCache(results: Array<{ source: string; skillId: string }>): void;
   /** @internal Await the in-flight model fetch (for tests). */
   _waitForModelFetch(): Promise<void>;
 }

@@ -1,9 +1,18 @@
-## What's new
+## What's new - v.4.8.0
 
-- Replace manual file-copy checkpoint system with a shadow git repo (.ag/shadow-git/) that captures the entire working tree at each checkpoint — closes the bash blind spot where npm install, sed, build scripts, etc. produced zero backups
-- Add session ID (8-char hex) shown in token footer and checkpoint listings for
-cross-session context
-- Show turn number in REPL prompt ([turn N] you>) so users can correlate with checkpoint/rewind listings
-- /checkpoint now lists by default; /checkpoint create [label] to create
-- Rewind properly resets turn counter, prunes stale summaries, and removes consumed checkpoints
-- /memory clear reinitializes shadow git instead of leaving a broken reference
+- **Steer fixed**: Removed raw mode management from editor (readline owns it), upgraded steer to use the editor module — now supports paste pills, Ctrl+U/W, and proper rendering                                                                    
+- **Late steer handling**: When a steer arrives during the agent's final text response, the response is discarded and re-requested with the steer injected (fixes 
+silent steer drop)
+- **Single-row rendering**: Prompt never wraps — uses horizontal viewport with `…`  
+indicators when content exceeds terminal width, preventing terminal scroll from     
+overwriting output above           
+- **Paste fixes**: Normalized `\r`/`\r\n` to `\n` for correct line counting; added  
+character-length threshold (>=200 chars) for pill detection; smart pill labels (`N  
+lines` vs `N chars`)               
+- **Status footer**: Editor-scoped footer showing model, context %, tokens, cost,   
+and turn — visible only during `you>` and `steer>` prompts using ANSI scroll region 
+- **Prompt simplified**: `[turn N] you>` → `you>` (turn number moved to footer)
+- **Context bar removed**: Redundant with footer; `/context` still shows full       
+breakdown                                                                           
+- **Shift+Tab**: Cycles completion candidates backward                              
+- **Ctrl+C**: Exits process at prompt, cancels steer during agent execution
