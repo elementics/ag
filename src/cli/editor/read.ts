@@ -1,4 +1,4 @@
-import type { EditorState, EditorResult, CompletionEngine } from './types.js';
+import type { EditorState, EditorResult, CompletionEngine, FooterData } from './types.js';
 import {
   createEmpty,
   insertChar,
@@ -15,7 +15,7 @@ import {
   getTextBeforeCursor,
   getTokenAtCursor,
 } from './buffer.js';
-import { renderPromptLine, renderCompletionRow, clearCompletionRow, resetRenderState } from './render.js';
+import { renderPromptLine, renderCompletionRow, clearCompletionRow, resetRenderState, renderFooter } from './render.js';
 import { commonPrefix } from './completion.js';
 
 const PASTE_LINE_THRESHOLD = 3;
@@ -31,9 +31,17 @@ function normalizeLineEndings(s: string): string {
 const BRACKET_PASTE_START = '\x1b[200~';
 const BRACKET_PASTE_END = '\x1b[201~';
 
+export interface ReadLineOptions {
+  /** If true, Ctrl+C exits the process. If false, resolves with empty string. Default: true. */
+  exitOnCtrlC?: boolean;
+  /** Footer data to display on a reserved bottom row. */
+  footer?: FooterData;
+}
+
 export function readLine(
   prompt: string,
   completionEngine: CompletionEngine | null,
+  options?: ReadLineOptions,
 ): Promise<EditorResult> {
   return new Promise<EditorResult>((resolve) => {
     let state: EditorState = createEmpty();
@@ -44,6 +52,30 @@ export function readLine(
     let completionShowing = false;
 
     const cols = () => process.stderr.columns || 80;
+    const rows = () => process.stderr.rows || 24;
+    const footerData = options?.footer ?? null;
+
+    function setupScrollRegion() {
+      if (!footerData) return;
+      const r = rows();
+      // Set scroll region to all rows except the last
+      process.stderr.write(`\x1b[1;${r - 1}r`);
+      // Render footer on the reserved bottom row
+      process.stderr.write(renderFooter(footerData, cols()));
+      // Move cursor back into scroll region
+      process.stderr.write(`\x1b[${r - 1};1H`);
+    }
+
+    function teardownScrollRegion() {
+      if (!footerData) return;
+      // Reset scroll region to full terminal
+      process.stderr.write('\x1b[r');
+      // Clear the footer row
+      const r = rows();
+      process.stderr.write(`\x1b[${r};1H\x1b[2K`);
+      // Move cursor back up
+      process.stderr.write(`\x1b[${r - 1};1H`);
+    }
 
     function render() {
       let out = renderPromptLine(prompt, state, cols());
@@ -57,13 +89,21 @@ export function readLine(
       process.stderr.write(out);
     }
 
+    function onResize() {
+      // Re-setup scroll region on terminal resize
+      if (footerData) {
+        setupScrollRegion();
+      }
+      render();
+    }
+
     function finish(text: string) {
       // Clean up
       if (pasteTimer) clearTimeout(pasteTimer);
       process.stdin.removeListener('data', onData);
-      process.stderr.removeListener('resize', render);
-      process.stdin.setRawMode(false);
-      // Disable bracket paste mode
+      process.stderr.removeListener('resize', onResize);
+      teardownScrollRegion();
+      // Disable bracket paste mode (raw mode is owned by readline, don't touch it)
       process.stderr.write('\x1b[?2004l');
       // Clear completion row if showing
       if (completionShowing) {
@@ -291,9 +331,9 @@ export function readLine(
           handleTab(-1);
           return;
 
-        case '\x03':  // Ctrl-C — exit process (matches readline default behavior)
+        case '\x03':  // Ctrl-C
           finish('');
-          process.exit(0);
+          if (options?.exitOnCtrlC !== false) process.exit(0);
           return;
 
         case '\x15':  // Ctrl-U
@@ -366,20 +406,15 @@ export function readLine(
 
     // ── Setup ──────────────────────────────────────────────────────────
 
-    try {
-      resetRenderState();
-      process.stdin.setRawMode(true);
-      // Enable bracket paste mode
-      process.stderr.write('\x1b[?2004h');
-      process.stdin.on('data', onData);
-      process.stdin.resume();
-      process.stderr.on('resize', render);
-      render();
-    } catch {
-      // Ensure cleanup if setup fails
-      try { process.stdin.setRawMode(false); } catch { /* ignore */ }
-      process.stderr.write('\x1b[?2004l');
-      resolve({ text: '' });
-    }
+    // Raw mode is owned by readline (set ON at construction, stays ON).
+    // We just add our data listener and enable bracket paste.
+    resetRenderState();
+    setupScrollRegion();
+    process.stderr.write('\n'); // blank line gap between previous output and prompt
+    process.stderr.write('\x1b[?2004h');
+    process.stdin.on('data', onData);
+    process.stdin.resume();
+    process.stderr.on('resize', onResize);
+    render();
   });
 }

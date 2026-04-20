@@ -52,6 +52,19 @@ export interface CompletionEngine {
   _waitForModelFetch(): Promise<void>;
 }
 
+// ── Footer data (shown while editor is active) ────────────────────────────
+
+export interface FooterData {
+  model: string;
+  contextPct: number;
+  contextUsed: number;
+  contextMax: number;
+  inputTokens: number;
+  outputTokens: number;
+  cost: number | null;
+  turn: number;
+}
+
 // ── Editor result ──────────────────────────────────────────────────────────
 
 export interface EditorResult {

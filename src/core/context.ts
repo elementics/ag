@@ -90,6 +90,24 @@ export class ContextTracker {
     return this.lastUsage?.prompt_tokens ?? null;
   }
 
+  getInputTokens(): number { return this.cumPromptTokens; }
+  getOutputTokens(): number { return this.cumCompletionTokens; }
+
+  getContextPct(): number {
+    if (!this.contextLength) return 0;
+    const used = this.lastUsage?.prompt_tokens ?? (this.estimated ? this.estimatedTokens : 0);
+    return Math.round((used / this.contextLength) * 100);
+  }
+
+  getSessionCostPublic(): number | null {
+    if (this.cumResponseCost > 0) return this.cumResponseCost;
+    if (this.promptCostPerToken !== null && this.completionCostPerToken !== null) {
+      return this.cumPromptTokens * this.promptCostPerToken
+           + this.cumCompletionTokens * this.completionCostPerToken;
+    }
+    return null;
+  }
+
   format(): string {
     const max = this.contextLength;
     if (!max) return '';

@@ -41,10 +41,14 @@ describe('REPL interrupt handling — raw mode invariant', () => {
     expect(runAgentBody).not.toMatch(/setRawMode\s*\(\s*false\s*\)/);
   });
 
-  it('pauses readline before adding keypress listener', () => {
-    // Must pause rl to detach its keypress handler before we add ours
-    const pauseIdx = runAgentBody.indexOf('.rl.pause()');
-    const onKeypressIdx = runAgentBody.indexOf("on('keypress'");
+  it('pauses readline before adding initial keypress listener', () => {
+    // Must pause rl to detach its keypress handler before we add ours.
+    // The initial setup is in the `if (process.stdin.isTTY)` block after
+    // the onKeypress function definition, not inside the steer handler.
+    const isTTYBlock = runAgentBody.indexOf('if (process.stdin.isTTY)');
+    expect(isTTYBlock).toBeGreaterThan(-1);
+    const pauseIdx = runAgentBody.indexOf('.rl.pause()', isTTYBlock);
+    const onKeypressIdx = runAgentBody.indexOf("on('keypress'", isTTYBlock);
     expect(pauseIdx).toBeGreaterThan(-1);
     expect(onKeypressIdx).toBeGreaterThan(-1);
     expect(pauseIdx).toBeLessThan(onKeypressIdx);

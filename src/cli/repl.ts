@@ -9,6 +9,7 @@ import { PermissionManager, inferPattern } from '../core/permissions.js';
 import type { ConfirmToolCall, PermissionKey, ContentBlock, ContentRef } from '../core/types.js';
 import { ingestContent, describeContent, displayContent, getAllContentRefs } from '../core/content.js';
 import { readLine, createCompletionEngine, type CompletionEngine } from './editor/index.js';
+import type { FooterData } from './editor/types.js';
 
 function formatRelativeTime(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -325,12 +326,8 @@ export class REPL {
       } catch { /* proceed without — fallback handled by tracker */ }
     }
     tracker.estimateFromChars(this.agent.getTotalContextChars());
-    const ctxLine = this.agent.getContextUsage();
 
     console.error(`${C.dim}Commands: /help${C.reset}`);
-    if (ctxLine) console.error(ctxLine);
-    const startupSession = tracker.formatSession();
-    if (startupSession) console.error(startupSession);
 
     const resumedSession = this.agent.getResumedSession();
     if (resumedSession) {
@@ -350,6 +347,7 @@ export class REPL {
       }
     }
     console.error('');
+    console.error('');
 
     // Enable keypress events on stdin for interrupt detection
     if (process.stdin.isTTY) emitKeypressEvents(process.stdin);
@@ -360,7 +358,7 @@ export class REPL {
     while (true) {
       try {
         const turn = this.agent.getCurrentTurn() + 1;
-        const input = await this.ask(`${C.dim}[turn ${turn}]${C.reset} ${C.green}you>${C.reset} `);
+        const input = await this.ask(`${C.green}you>${C.reset} `, this.buildFooterData(turn));
         if (!input.trim()) continue;
         if (input.startsWith('/')) { await this.handleCommand(input); continue; }
         let hitMaxIterations = false;
@@ -373,6 +371,7 @@ export class REPL {
           // ── Steer state ──
           let steerActive = false;
           let steerResolve: (() => void) | null = null;
+          let steerPromise: Promise<void> | null = null;
           const chunkBuffer: import('../core/types.js').StreamChunk[] = [];
 
           // ── Keypress handler: Escape to abort, Tab to steer ──
@@ -389,21 +388,22 @@ export class REPL {
               steerActive = true;
               clearSpinner();
               process.stdin.removeListener('keypress', onKeypress);
-              this.rl.resume();
-              // Buffer line so readline wrapping doesn't overwrite real output above
+              // Save/remove data listeners so the editor gets exclusive stdin access
+              const savedSteerListeners = process.stdin.rawListeners('data');
+              process.stdin.removeAllListeners('data');
               process.stderr.write('\n');
               const steerPrompt = `  ${C.yellow}steer>${C.reset} `;
-              const steerPromptVisibleLen = 10; // "  steer> "
-              this.rl.question(steerPrompt, (answer: string) => {
-                this.rl.pause();
+              steerPromise = readLine(steerPrompt, null, { exitOnCtrlC: false }).then(result => {
+                // Restore data listeners
+                for (const listener of savedSteerListeners) {
+                  process.stdin.on('data', listener as (...args: unknown[]) => void);
+                }
+                const answer = result.text;
                 if (answer.trim()) {
                   this.agent.queueSteer(answer.trim());
                 }
-                // Clear all rows: prompt rows + buffer line
-                const cols = process.stderr.columns || 80;
-                const promptRows = Math.ceil((steerPromptVisibleLen + answer.length) / cols);
-                const totalRows = promptRows + 1; // +1 for buffer line
-                for (let i = 0; i < totalRows; i++) process.stderr.write('\x1b[A\x1b[2K');
+                // The editor already cleared its own prompt line on Enter.
+                // Just show the steered confirmation if applicable.
                 if (answer.trim()) {
                   process.stderr.write(`  ${C.yellow}[steered]${C.reset} ${C.dim}${answer.trim()}${C.reset}\n`);
                 }
@@ -415,6 +415,7 @@ export class REPL {
                 }
                 chunkBuffer.length = 0;
                 steerActive = false;
+                steerPromise = null;
                 process.stdin.on('keypress', onKeypress);
                 process.stdin.resume();
                 // Unblock any waiting permission prompts
@@ -532,8 +533,8 @@ export class REPL {
               }
               case 'done':
                 clearSpinner();
-                if (hasText) { flushLines(true, true); eraseTrailingBlanks(); process.stderr.write('\n'); }
-                else if (!hadTools) process.stderr.write(`\n${C.bold}agent>${C.reset} ${renderMarkdown(chunk.content || '')}\n`);
+                if (hasText) { flushLines(true, true); eraseTrailingBlanks(); process.stderr.write('\n\n'); }
+                else if (!hadTools) process.stderr.write(`\n${C.bold}agent>${C.reset} ${renderMarkdown(chunk.content || '')}\n\n`);
                 break;
               case 'max_iterations':
                 clearSpinner();
@@ -568,6 +569,8 @@ export class REPL {
               process.stderr.write(`  ${C.yellow}⚡ Interrupted${C.reset}\n\n`);
             }
           } finally {
+            // Wait for any active steer to finish before cleaning up
+            if (steerPromise) await steerPromise;
             if (process.stdin.isTTY) {
               process.stdin.removeListener('keypress', onKeypress);
             }
@@ -599,13 +602,15 @@ export class REPL {
           hitMaxIterations = false;
           await runAgent('continue where you left off');
         }
-        // Re-estimate if API didn't return usage (ensures bar reflects current state)
+        // Warn if any steer messages were queued but never consumed
+        const dropped = this.agent.drainUnconsumedSteers();
+        if (dropped.length > 0) {
+          console.error(`  ${C.yellow}⚠ Steer arrived too late — agent had already finished.${C.reset}`);
+          console.error(`  ${C.dim}Tip: re-send as your next message.${C.reset}\n`);
+        }
+        // Re-estimate usage so the footer is accurate on next prompt
         const tracker = this.agent.getContextTracker();
         if (!tracker.getUsedTokens()) tracker.estimateFromChars(this.agent.getTotalContextChars());
-        const ctx = this.agent.getContextUsage();
-        if (ctx) console.error(ctx);
-        const sessionLine = tracker.formatSession();
-        if (sessionLine) console.error(sessionLine);
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : String(error);
         console.error(`${C.red}Error: ${msg}${C.reset}\n`);
@@ -697,12 +702,7 @@ export class REPL {
             }
           } catch { /* proceed without */ }
           tracker.estimateFromChars(this.agent.getTotalContextChars());
-          const ctxLine = this.agent.getContextUsage();
-          console.error(`${C.yellow}Model set to: ${this.agent.getModel()} (saved)${C.reset}`);
-          if (ctxLine) console.error(ctxLine);
-          const sessionLine = tracker.formatSession();
-          if (sessionLine) console.error(sessionLine);
-          console.error('');
+          console.error(`${C.yellow}Model set to: ${this.agent.getModel()} (saved)${C.reset}\n`);
         } else {
           console.error(`${C.dim}Current model: ${this.agent.getModel()}${C.reset}\n`);
         }
@@ -882,10 +882,6 @@ export class REPL {
           try {
             await this.agent.compactNow();
             console.error(`${C.green}Compaction complete.${C.reset}`);
-            const ctx = this.agent.getContextUsage();
-            if (ctx) console.error(ctx);
-            const sessionLine = tracker.formatSession();
-            if (sessionLine) console.error(sessionLine);
           } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
             console.error(`${C.red}Compaction failed: ${msg}${C.reset}`);
@@ -1232,19 +1228,30 @@ export class REPL {
     }
   }
 
-  private async ask(prompt: string): Promise<string> {
+  private buildFooterData(turn: number): FooterData {
+    const tracker = this.agent.getContextTracker();
+    return {
+      model: this.agent.getModel(),
+      contextPct: tracker.getContextPct(),
+      contextUsed: tracker.getUsedTokens() ?? 0,
+      contextMax: tracker.getContextLength() ?? 0,
+      inputTokens: tracker.getInputTokens(),
+      outputTokens: tracker.getOutputTokens(),
+      cost: tracker.getSessionCostPublic(),
+      turn,
+    };
+  }
+
+  private async ask(prompt: string, footer?: FooterData): Promise<string> {
     if (process.stdin.isTTY) {
       this.rl.pause();
       // Save and remove readline's internal data listeners — they conflict with raw mode
       const savedDataListeners = process.stdin.rawListeners('data');
       process.stdin.removeAllListeners('data');
       try {
-        const result = await readLine(prompt, this.completionEngine);
+        const result = await readLine(prompt, this.completionEngine, { footer });
         return result.text;
       } finally {
-        if (process.stdin.isTTY && (process.stdin as any).isRaw) {
-          process.stdin.setRawMode(false);
-        }
         // Restore readline's data listeners before resuming
         for (const listener of savedDataListeners) {
           process.stdin.on('data', listener as (...args: unknown[]) => void);

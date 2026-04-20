@@ -668,6 +668,13 @@ export class Agent implements SkillHost {
       }
 
       if (!msg.tool_calls?.length) {
+        // ── Late steer check: if a steer arrived during this text response,
+        //    discard the response and re-request with the steer injected ──
+        if (this.steerQueue.length > 0) {
+          this.messages.pop(); // remove the assistant message we just pushed
+          continue; // next iteration drains steerQueue and re-requests
+        }
+
         // ── turn_end event (no tools) ──
         await this.events.emit('turn_end', { iteration: i, hadToolCalls: false, toolCallCount: 0 });
 
@@ -944,6 +951,13 @@ export class Agent implements SkillHost {
   /** Queue a message to inject before the next LLM turn (non-destructive steering) */
   queueSteer(message: string): void {
     this.steerQueue.push(message);
+  }
+
+  /** Drain any unconsumed steer messages (for warning the user after agent finishes). */
+  drainUnconsumedSteers(): string[] {
+    const leftover = [...this.steerQueue];
+    this.steerQueue.length = 0;
+    return leftover;
   }
   setModel(model: string): void { this.model = model; this.contextTracker = new ContextTracker(model); this.contextTracker.setSessionId(this.sessionId); }
   setBaseURL(url: string): void { this.baseURL = url; }
