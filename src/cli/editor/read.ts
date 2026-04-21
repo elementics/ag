@@ -36,6 +36,8 @@ export interface ReadLineOptions {
   exitOnCtrlC?: boolean;
   /** Footer data to display on a reserved bottom row. */
   footer?: FooterData;
+  /** Optional callback for Shift+Tab when not cycling completions. */
+  onShiftTab?: () => void;
 }
 
 export function readLine(
@@ -64,6 +66,14 @@ export function readLine(
       process.stderr.write(renderFooter(footerData, cols()));
       // Move cursor back into scroll region
       process.stderr.write(`\x1b[${r - 1};1H`);
+    }
+
+    function updateFooter() {
+      if (!footerData) return;
+      // Save cursor, redraw just the footer row, then restore cursor.
+      process.stderr.write('\x1b7');
+      process.stderr.write(renderFooter(footerData, cols()));
+      process.stderr.write('\x1b8');
     }
 
     function teardownScrollRegion() {
@@ -327,7 +337,12 @@ export function readLine(
           handleTab(1);
           return;
 
-        case '\x1b[Z':  // Shift+Tab — cycle backward
+        case '\x1b[Z':  // Shift+Tab — cycle backward or toggle mode
+          if (options?.onShiftTab && !state.completionState?.showing) {
+            options.onShiftTab();
+            updateFooter();
+            return;
+          }
           handleTab(-1);
           return;
 

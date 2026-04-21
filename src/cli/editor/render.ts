@@ -209,8 +209,12 @@ export function renderFooter(data: FooterData, cols: number): string {
   const filled = Math.round((pct / 100) * BAR_WIDTH);
   const barColor = pct >= 80 ? C.red : pct >= 50 ? C.yellow : C.green;
   const bar = `${barColor}${'█'.repeat(filled)}${'░'.repeat(BAR_WIDTH - filled)}${C.reset}`;
+  const modeColor = data.mode === 'plan'
+    ? C.green
+    : ('NO_COLOR' in process.env || !process.stderr.isTTY ? '' : '\x1b[38;5;208m');
 
   const parts: string[] = [];
+  parts.push(`${modeColor}${data.mode}${C.reset}`);
   parts.push(data.model);
   parts.push(`${bar} ${barColor}${pct}%${C.reset}`);
   parts.push(`↑${formatTokensShort(data.inputTokens)} ↓${formatTokensShort(data.outputTokens)}`);

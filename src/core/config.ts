@@ -12,11 +12,12 @@ export interface PersistentConfig {
   tavilyApiKey?: string;
   autoApprove?: boolean;
   contextLength?: number;
+  interactionMode?: 'plan' | 'auto';
 }
 
 export const CONFIG_KEYS: readonly (keyof PersistentConfig)[] = [
   'apiKey', 'model', 'baseURL', 'systemPrompt', 'maxIterations',
-  'tavilyApiKey', 'autoApprove', 'contextLength',
+  'tavilyApiKey', 'autoApprove', 'contextLength', 'interactionMode',
 ];
 
 export const CONFIG_KEY_ALIASES: Readonly<Record<string, keyof PersistentConfig>> = {
@@ -25,6 +26,7 @@ export const CONFIG_KEY_ALIASES: Readonly<Record<string, keyof PersistentConfig>
   'api_key': 'apiKey',
   'auto_approve': 'autoApprove',
   'autoapprove': 'autoApprove',
+  'interaction_mode': 'interactionMode',
 };
 
 export function configPath(): string {

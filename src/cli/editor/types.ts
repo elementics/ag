@@ -56,6 +56,7 @@ export interface CompletionEngine {
 // ── Footer data (shown while editor is active) ────────────────────────────
 
 export interface FooterData {
+  mode: 'plan' | 'auto';
   model: string;
   contextPct: number;
   contextUsed: number;

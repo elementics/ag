@@ -1,8 +1,8 @@
-import { Message, Tool, AgentConfig, StreamChunk, ConfirmToolCall, ContentBlock, ContentRef } from './types.js';
+import { Message, Tool, AgentConfig, StreamChunk, ConfirmToolCall, ContentBlock, ContentRef, InteractionMode } from './types.js';
 import { AgentEventEmitter, deriveProvider, type EventName, type EventHandler } from './events.js';
 import { discoverExtensions, loadExtensions, type ExtensionMeta } from './extensions.js';
 import { C } from './colors.js';
-import { loadContext, loadHistory, appendHistory, rewriteHistory, getStats, clearProject, clearAll, paths, saveGlobalMemory, saveProjectMemory, savePlan, appendPlan, setActivePlan, getActivePlanName, loadGlobalMemory, loadProjectMemory, loadPlan, loadPlanByName, listPlans, cleanupTasks, saveSessionState, loadSessionState, type MemoryStats } from '../memory/memory.js';
+import { loadContext, loadHistory, appendHistory, rewriteHistory, getStats, clearProject, clearAll, clearSession, paths, saveGlobalMemory, saveProjectMemory, savePlan, appendPlan, setActivePlan, getActivePlanName, loadGlobalMemory, loadProjectMemory, loadPlan, loadPlanByName, listPlans, cleanupTasks, saveSessionState, loadSessionState, type MemoryStats } from '../memory/memory.js';
 import { bashToolFactory } from '../tools/bash.js';
 import { memoryTool } from '../tools/memory.js';
 import { planTool } from '../tools/plan.js';
@@ -37,6 +37,98 @@ const MAX_MESSAGES = 200;
 const MAX_EMPTY_RETRIES = 2;
 const MAX_CONSECUTIVE_TOOL_FAILURES = 3;
 
+function repairToolArguments(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return '{}';
+
+  let candidate = trimmed;
+  if (candidate.startsWith('```')) {
+    candidate = candidate
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+  }
+
+  const firstStructured = candidate.search(/[\[{]/);
+  if (firstStructured > 0) candidate = candidate.slice(firstStructured).trim();
+
+  try {
+    JSON.parse(candidate);
+    return candidate;
+  } catch { /* continue with conservative repair */ }
+
+  candidate = candidate.replace(/,\s*([}\]])/g, '$1');
+
+  let depthCurly = 0;
+  let depthSquare = 0;
+  let inString = false;
+  let escaped = false;
+  let endIdx = candidate.length;
+  for (let i = 0; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{') depthCurly++;
+    else if (ch === '}') depthCurly = Math.max(0, depthCurly - 1);
+    else if (ch === '[') depthSquare++;
+    else if (ch === ']') depthSquare = Math.max(0, depthSquare - 1);
+    if (depthCurly === 0 && depthSquare === 0 && (ch === '}' || ch === ']')) endIdx = i + 1;
+  }
+
+  candidate = candidate.slice(0, endIdx).trim();
+  if (!candidate) return null;
+  if (inString) candidate += '"';
+  candidate += ']'.repeat(depthSquare);
+  candidate += '}'.repeat(depthCurly);
+  candidate = candidate.replace(/,\s*([}\]])/g, '$1');
+
+  try {
+    JSON.parse(candidate);
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+export function parseToolArguments(raw: string): Record<string, unknown> | null {
+  const repaired = repairToolArguments(raw);
+  if (!repaired) return null;
+  try {
+    const parsed = JSON.parse(repaired);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getPlanModeBlockReason(toolName: string, args: Record<string, unknown>, tool?: Tool): string | null {
+  if (toolName === 'agent') {
+    return 'Blocked in plan mode: sub-agents are disabled until you switch to auto mode.';
+  }
+  if (toolName === 'bash') {
+    return 'Blocked in plan mode: bash execution is disabled until you switch to auto mode.';
+  }
+  if (toolName === 'web') {
+    return null;
+  }
+  return isReadOnlyToolCall(toolName, args, tool)
+    ? null
+    : `Blocked in plan mode: ${toolName} is not allowed until you switch to auto mode.`;
+}
+
 export class Agent implements SkillHost {
   private apiKey: string;
   private model: string;
@@ -63,6 +155,7 @@ export class Agent implements SkillHost {
   private spinnerControl: { pause: () => void; resume: () => void } | null = null;
   private readonly silent: boolean;
   private readonly noHistory: boolean;
+  private interactionMode: InteractionMode;
   private steerQueue: string[] = [];
   private currentTurn = 0;
   private sessionId = randomBytes(4).toString('hex');
@@ -77,34 +170,81 @@ export class Agent implements SkillHost {
     this.apiKey = config.apiKey || process.env.OPENROUTER_API_KEY || '';
     const isDefaultBaseURL = this.baseURL === 'https://openrouter.ai/api/v1';
     if (!this.apiKey && isDefaultBaseURL) throw new Error('No API key. Set OPENROUTER_API_KEY, pass -k, or run `ag` interactively to configure.');
-    this.baseSystemPrompt = config.systemPrompt || `You are ag, an autonomous coding agent. You complete tasks by calling tools. Find information yourself — only ask the user when genuinely stuck after investigation.
+    this.baseSystemPrompt = config.systemPrompt || `You are ag, an autonomous coding agent in an interactive CLI. Complete software engineering tasks by calling tools deliberately, preserving context, and avoiding unnecessary user interruptions.
+
+# Core behavior
+- Be concise, direct, and action-oriented.
+- For non-trivial multi-step work, first propose a short plan and wait for user confirmation before creating tasks, editing files, or running write actions.
+- Default to discussion-first for planning; execution starts only after the user approves or explicitly asks you to proceed.
+- Read-only investigation is allowed before plan approval.
+- Do the work end-to-end when possible: investigate, change code, verify, and report the result.
+- Do not ask the user for information until you have checked available context and tools first.
+- Do exactly what was asked, nothing more — no extra features, refactoring, comments, or error handling for impossible scenarios.
+
+# Retrieval policy
+Before asking the user, re-running a broad search, or guessing, check context in this order:
+1. Current turn and recent conversation already in context
+2. Active plan and tasks
+3. Persistent memory
+4. Result refs and content refs
+5. Conversation history
+6. Project files via file/grep
+7. External sources via web, only when needed
+
+- If the answer can be recovered from memory, tasks, result refs, content refs, or history, use those first.
+- If the user asks about prior tool output, exact previous text, logs, command output, or generated artifacts, prefer result(action=get) or content(action=get) over re-running tools.
+- If the user asks about prior conversation decisions, preferences, or earlier findings, prefer memory/history before searching the codebase again.
+- Do not hallucinate missing prior output. Retrieve it.
+- Use history(action=search) and history(action=recent) only after checking current context, plan/tasks, memory, and refs.
 
 # Tool routing
+- When calling a tool, arguments must always be valid JSON matching the declared schema.
+- Only use fields defined by the tool schema. Do not emit prose, markdown, comments, trailing commas, or partial objects in tool arguments.
 - file(action=read) for reading files, file(action=edit) for editing, file(action=write) for creating, file(action=list) for browsing directories
 - grep(action=search) for searching file contents, grep(action=find) for locating files by name/pattern
 - git for all version control operations
-- bash exclusively for running commands: tests, builds, installs, servers, and system operations
+- bash exclusively for running commands: tests, builds, installs, servers, generators, and system operations
+- task to track executable steps during multi-step work
+- plan to save or inspect larger plans
+- memory to store or retrieve persistent user/project context
+- result to retrieve cached large tool outputs from prior turns
+- content to retrieve cached images/PDFs from prior turns
+- history to search past conversation history when current context and memory are insufficient
 - If a file is mentioned vaguely, locate it with grep(action=find) first
 
+# Task discipline
+- For multi-step work, create and maintain tasks.
+- Keep task state accurate as you go. Mark work in progress before starting it and mark it done when completed.
+- Use plans for larger efforts and tasks for concrete executable steps.
+- Prefer continuing an existing plan/task set over creating duplicates.
+
 # Working with code
-- Read a file before editing it — so you match exact content
-- Prefer editing existing files over creating new ones
-- Do exactly what was asked, nothing more — no extra features, refactoring, comments, or error handling for impossible scenarios
-- Fix security vulnerabilities (XSS, injection) immediately if you introduce them
-- After making changes, verify they work: run tests, check for syntax errors, or start the dev server as appropriate
+- Read a file before editing it so you match exact content and local conventions.
+- Prefer editing existing files over creating new ones.
+- Follow existing patterns, naming, and library choices in surrounding code.
+- Never assume a library exists without checking the codebase.
+- Fix security vulnerabilities (XSS, injection) immediately if you introduce them.
+- Never expose secrets, credentials, or tokens.
+
+# Exactness rules
+- If the user asks for exact lines, exact output, quoted text, logs, prior screenshots, or attachment details, retrieve the underlying source instead of answering from a summary.
+- If a summary is sufficient, do not retrieve large payloads unnecessarily.
+- If a previous result already contains the needed failure output, retrieve it with result(action=get) instead of rerunning immediately.
 
 # Error recovery
-- Diagnose failures before switching tactics — read errors, check assumptions, try a focused fix
-- On file(action=edit) "not found": re-read the file to verify exact content
-- On bash non-zero exit: read stderr to understand the failure
+- Diagnose failures before switching tactics — read errors, check assumptions, try a focused fix.
+- On file(action=edit) "not found": re-read the file to verify exact content.
+- On bash non-zero exit: read stderr/output to understand the failure before retrying.
+
+# Verification
+- After making changes, verify they work: run tests, check for syntax errors, or start the dev server as appropriate.
+- Prefer the narrowest verification that proves the change, then expand if needed.
+- If verification cannot be run, say so plainly.
 
 # Git workflow
 - Read the diff before committing. Commit messages explain why, not what.
-- Amend commits and force-push only when the user asks
-- Exclude secrets (.env, credentials, keys) from commits
-
-# History
-- history(action=search) and history(action=recent) search past conversations — use as a last resort after checking current context and memory
+- Amend commits and force-push only when the user asks.
+- Exclude secrets (.env, credentials, keys) from commits.
 
 # Output
 - Be concise. No filler, no trailing summaries.
@@ -113,6 +253,7 @@ export class Agent implements SkillHost {
     this.systemPromptSuffix = config.systemPromptSuffix || '';
     this.silent = config.silent ?? false;
     this.noHistory = config.noHistory ?? false;
+    this.interactionMode = config.interactionMode ?? 'auto';
     this.maxIterations = config.maxIterations || 200;
     this.cwd = config.cwd || process.cwd();
     this.confirmToolCall = config.confirmToolCall ?? null;
@@ -231,6 +372,11 @@ export class Agent implements SkillHost {
 
   private get systemPrompt(): string {
     const parts = [this.baseSystemPrompt];
+    if (this.interactionMode === 'plan') {
+      parts.push('<interaction-mode mode="plan">\nPlan mode is active. You may investigate with read-only tools, browse the web, and create or update plans/tasks, but do not edit files, run bash, or spawn sub-agents until the user switches to auto mode.\n</interaction-mode>');
+    } else {
+      parts.push('<interaction-mode mode="auto">\nAuto mode is active. You may execute approved work end-to-end, subject to the rest of the instructions.\n</interaction-mode>');
+    }
     parts.push(getEnvironmentContext(this.cwd));
     const listing = getProjectListing(this.cwd);
     if (listing) parts.push(listing);
@@ -708,7 +854,7 @@ export class Agent implements SkillHost {
         yield { type: 'thinking', content: label };
       }
       for (const call of msg.tool_calls) {
-        const args = (() => { try { return JSON.parse(call.function.arguments || '{}'); } catch { return null; } })();
+        const args = parseToolArguments(call.function.arguments || '{}');
         const summary = args
           ? String(args.command ?? args.action ?? args.prompt ?? call.function.name).slice(0, 80)
           : `${call.function.name} (malformed arguments)`;
@@ -717,42 +863,62 @@ export class Agent implements SkillHost {
 
       // Permission checks — run sequentially so prompts don't overlap
       const permissionDecisions = new Map<string, 'allow' | 'deny'>();
+      const modeBlocks = new Map<string, string>();
       for (const call of msg.tool_calls) {
         if (signal?.aborted) break;
         const tool = this.tools.get(call.function.name);
         if (!tool) continue;
-        let args: Record<string, unknown>;
-        try { args = JSON.parse(call.function.arguments || '{}'); }
-        catch { permissionDecisions.set(call.id, 'deny'); continue; }
-        if (this.confirmToolCall && !isReadOnlyToolCall(call.function.name, args)) {
+        const args = parseToolArguments(call.function.arguments || '{}');
+        if (!args) { permissionDecisions.set(call.id, 'deny'); continue; }
+        if (this.interactionMode === 'plan') {
+          const blockReason = getPlanModeBlockReason(call.function.name, args, tool);
+          if (blockReason) {
+            permissionDecisions.set(call.id, 'deny');
+            modeBlocks.set(call.id, blockReason);
+            continue;
+          }
+        }
+        if (this.confirmToolCall && !isReadOnlyToolCall(call.function.name, args, tool)) {
           permissionDecisions.set(call.id, await this.confirmToolCall(call.function.name, args, tool.permissionKey));
         }
       }
 
       // Execute tool calls — yield results as they complete (not Promise.all)
       const execPromises = msg.tool_calls.map(async (call) => {
-        if (signal?.aborted) return { call, content: '[cancelled by user]', isError: true };
+        if (signal?.aborted) return { call, content: '[cancelled by user]', rawContent: '[cancelled by user]', isError: true };
         const tool = this.tools.get(call.function.name);
-        if (!tool) return { call, content: `Error: unknown tool "${call.function.name}"`, isError: true };
-        let args: Record<string, unknown>;
-        try { args = JSON.parse(call.function.arguments || '{}'); }
-        catch { return { call, content: 'Error: malformed tool arguments', isError: true }; }
+        if (!tool) {
+          const message = `Error: unknown tool "${call.function.name}"`;
+          return { call, content: message, rawContent: message, isError: true };
+        }
+        let args = parseToolArguments(call.function.arguments || '{}');
+        if (!args) {
+          const message = 'Error: malformed tool arguments';
+          return { call, content: message, rawContent: message, isError: true };
+        }
+        const modeBlock = modeBlocks.get(call.id);
+        if (modeBlock) {
+          return { call, content: modeBlock, rawContent: modeBlock, isError: true };
+        }
 
         if (permissionDecisions.get(call.id) === 'deny') {
-          return { call, content: 'Tool call denied by user.', isError: true };
+          const message = 'Tool call denied by user.';
+          return { call, content: message, rawContent: message, isError: true };
         }
 
         // ── tool_call event ──
         const tcEvent = { toolName: call.function.name, toolCallId: call.id, args, block: false, blockReason: undefined as string | undefined };
         await this.events.emit('tool_call', tcEvent);
         if (tcEvent.block) {
-          return { call, content: tcEvent.blockReason || 'Blocked by extension', isError: true };
+          const message = tcEvent.blockReason || 'Blocked by extension';
+          return { call, content: message, rawContent: message, isError: true };
         }
         args = tcEvent.args as Record<string, unknown>;
 
         try {
           const rawResult = await tool.execute(args);
-          let result = truncateToolResult(rawResult);
+          const previewResult = truncateToolResult(rawResult);
+          let result = previewResult;
           let isError = result.startsWith('Error:') || result.startsWith('EXIT ');
 
           // ── tool_result event ──
@@ -761,15 +927,17 @@ export class Agent implements SkillHost {
           result = trEvent.content;
           isError = trEvent.isError;
 
-          return { call, content: result, isError };
+          const rawContent = trEvent.content === previewResult ? rawResult : trEvent.content;
+          return { call, content: result, rawContent, isError };
         } catch (error) {
-          return { call, content: `Tool error: ${error}`, isError: true };
+          const message = `Tool error: ${error}`;
+          return { call, content: message, rawContent: message, isError: true };
         }
       });
 
       // Yield results as they resolve (not waiting for all)
       const completedCallIds = new Set<string>();
-      const execResults: Array<{ call: typeof msg.tool_calls[0]; content: string; isError: boolean }> = [];
+      const execResults: Array<{ call: typeof msg.tool_calls[0]; content: string; rawContent: string; isError: boolean }> = [];
       for await (const r of raceAll(execPromises)) {
         completedCallIds.add(r.call.id);
         execResults.push(r);
@@ -797,10 +965,12 @@ export class Agent implements SkillHost {
         }
 
         // Cache large tool results as ResultRefs (send-once pattern)
-        if (typeof toolContent === 'string' && !r.isError && toolContent.length > RESULT_REF_THRESHOLD) {
+        let resultRefId: number | undefined;
+        if (typeof toolContent === 'string' && !r.isError && r.rawContent.length > RESULT_REF_THRESHOLD) {
           let args: Record<string, unknown> | undefined;
           try { args = JSON.parse(r.call.function.arguments || '{}'); } catch { /* ignore */ }
-          const resultRef = cacheResult(r.call.function.name, toolContent, this.currentTurn, this.cwd, args);
+          const resultRef = cacheResult(r.call.function.name, r.rawContent, this.currentTurn, this.cwd, args);
+          resultRefId = resultRef.id;
           // On introduction turn: send full content + ref metadata
           toolContent = [
             { type: 'text', text: toolContent },
@@ -810,7 +980,7 @@ export class Agent implements SkillHost {
 
         this.messages.push({ role: 'tool', tool_call_id: r.call.id, content: toolContent, _turn: this.currentTurn });
         this.appendToHistory({ role: 'tool', tool_call_id: r.call.id, content: toolContent });
-        yield { type: 'tool_end', toolName: r.call.function.name, toolCallId: r.call.id, content: r.content, success: !r.isError };
+        yield { type: 'tool_end', toolName: r.call.function.name, toolCallId: r.call.id, content: r.content, resultRefId, success: !r.isError };
 
         // Check abort after each tool completes
         if (signal?.aborted) break;
@@ -943,6 +1113,7 @@ export class Agent implements SkillHost {
   }
   getToolFailures(): Array<{ file: string; name?: string; reason: string }> { return this.toolFailures; }
   getModel(): string { return this.model; }
+  getInteractionMode(): InteractionMode { return this.interactionMode; }
   getBaseURL(): string { return this.baseURL; }
   getApiKey(): string { return this.apiKey; }
   getCwd(): string { return this.cwd; }
@@ -960,6 +1131,7 @@ export class Agent implements SkillHost {
     return leftover;
   }
   setModel(model: string): void { this.model = model; this.contextTracker = new ContextTracker(model); this.contextTracker.setSessionId(this.sessionId); }
+  setInteractionMode(mode: InteractionMode): void { this.interactionMode = mode; }
   setBaseURL(url: string): void { this.baseURL = url; }
   setApiKey(key: string): void { this.apiKey = key; }
   getConfirmToolCall(): ConfirmToolCall | null { return this.confirmToolCall; }
@@ -1010,6 +1182,7 @@ export class Agent implements SkillHost {
 
   async clearProject(): Promise<void> { this.messages = []; this.contextTracker.reset(); await this.checkpointStore?.clear(); this.turnSummaries.clear(); this.currentTurn = 0; this.sessionId = randomBytes(4).toString('hex'); this.contextTracker.setSessionId(this.sessionId); clearProject(this.cwd); }
   async clearAll(): Promise<void> { this.messages = []; this.contextTracker.reset(); await this.checkpointStore?.clear(); this.turnSummaries.clear(); this.currentTurn = 0; this.sessionId = randomBytes(4).toString('hex'); this.contextTracker.setSessionId(this.sessionId); clearAll(this.cwd); }
+  clearSession(): void { this.messages = []; this.contextTracker.reset(); this.turnSummaries.clear(); this.currentTurn = 0; this.sessionId = randomBytes(4).toString('hex'); this.contextTracker.setSessionId(this.sessionId); this.resumedSession = null; this.steerQueue.length = 0; clearSession(this.cwd); }
 
   // ── Context tracking ───────────────────────────────────────────────────
   getContextUsage(): string { return this.contextTracker.format(); }

@@ -3,11 +3,15 @@ import { createCompletionEngine } from '../../editor/completion.js';
 import type { Agent } from '../../../core/agent.js';
 
 // Minimal mock agent
-function mockAgent(models: Array<{ id: string; name: string }> = []): Agent {
+function mockAgent(
+  models: Array<{ id: string; name: string }> = [],
+  plans: Array<{ name: string; path: string }> = [],
+): Agent {
   return {
     fetchModels: vi.fn().mockResolvedValue(
       models.map(m => ({ ...m, context_length: 128000, pricing: {} })),
     ),
+    getPlans: vi.fn().mockReturnValue(plans),
   } as unknown as Agent;
 }
 
@@ -67,9 +71,49 @@ describe('CompletionEngine', () => {
       expect(results.map(c => c.text).sort()).toEqual(['clear', 'global', 'project']);
     });
 
+    it('completes memory clear scopes in safer order', () => {
+      const results = engine.complete('/memory clear ') as any[];
+      expect(results.map(c => c.text)).toEqual(['session', 'project', 'all']);
+    });
+
+    it('completes clear alias scopes in safer order', () => {
+      const results = engine.complete('/clear ') as any[];
+      expect(results.map(c => c.text)).toEqual(['session', 'project', 'all']);
+    });
+
     it('lists content subcommands', () => {
       const results = engine.complete('/content ') as any[];
       expect(results.map(c => c.text).sort()).toEqual(['add', 'clear', 'list', 'paste', 'screenshot']);
+    });
+  });
+
+  // ── Plan use ───────────────────────────────────────────────────────────
+
+  describe('plan use completion', () => {
+    it('lists all plans for /plan use ', () => {
+      const plans = [
+        { name: '2026-04-21T11-40-59-bbc-news-fetch', path: '/plans/bbc.md' },
+        { name: '2026-04-21T11-04-30-snippet-note', path: '/plans/snippet.md' },
+      ];
+      const eng = createCompletionEngine(mockAgent([], plans));
+      const results = eng.complete('/plan use ') as any[];
+      expect(results.map(c => c.text)).toEqual([plans[0].name, plans[1].name]);
+    });
+
+    it('filters plans by substring match', () => {
+      const plans = [
+        { name: '2026-04-21T11-40-59-bbc-news-fetch', path: '/plans/bbc.md' },
+        { name: '2026-04-21T11-04-30-snippet-note', path: '/plans/snippet.md' },
+      ];
+      const eng = createCompletionEngine(mockAgent([], plans));
+      const results = eng.complete('/plan use bbc') as any[];
+      expect(results).toEqual([{ text: plans[0].name, display: plans[0].name }]);
+    });
+
+    it('returns empty when no plans match', () => {
+      const eng = createCompletionEngine(mockAgent([], [{ name: 'some-plan', path: '/p.md' }]));
+      const results = eng.complete('/plan use xyz') as any[];
+      expect(results).toEqual([]);
     });
   });
 
@@ -81,16 +125,17 @@ describe('CompletionEngine', () => {
       expect(results.some(c => c.text === 'baseURL')).toBe(true);
     });
 
-    it('completes /config unset api to apiKey and aliases', () => {
+    it('completes /config unset api to apiKey only (no aliases)', () => {
       const results = engine.complete('/config unset api') as any[];
       const texts = results.map(c => c.text);
       expect(texts).toContain('apiKey');
-      expect(texts).toContain('api_key');
+      expect(texts).not.toContain('api_key');
     });
 
-    it('includes all valid keys for empty partial', () => {
+    it('includes only canonical keys for empty partial', () => {
       const results = engine.complete('/config set ') as any[];
-      expect(results.length).toBeGreaterThan(8); // 8 keys + aliases
+      expect(results.length).toBeGreaterThanOrEqual(8);
+      expect(results.every(c => !c.text.includes('_'))).toBe(true);
     });
   });
 

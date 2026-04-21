@@ -20,10 +20,13 @@ describe('StreamChunk types', () => {
   });
 
   it('tool_end chunk has correct shape', () => {
-    const chunk: StreamChunk = { type: 'tool_end', toolName: 'file', toolCallId: 'call_456', content: 'result', success: true };
+    const chunk: StreamChunk = { type: 'tool_end', toolName: 'file', toolCallId: 'call_456', content: 'result', resultRefId: 3, success: true };
     expect(chunk.type).toBe('tool_end');
+    expect(chunk.toolName).toBe('file');
+    expect(chunk.toolCallId).toBe('call_456');
     expect(chunk.success).toBe(true);
     expect(chunk.content).toBe('result');
+    expect(chunk.resultRefId).toBe(3);
   });
 
   it('done chunk has correct shape', () => {

@@ -251,11 +251,13 @@ export class REPL {
   private confirmCb: ReturnType<typeof createPermissionCallback> | null;
   private pendingContentRefs: ContentRef[] = [];
   private completionEngine: CompletionEngine | null = null;
+  private interactionMode: 'plan' | 'auto';
 
   constructor(agent: Agent, pm?: PermissionManager, confirmCb?: ReturnType<typeof createPermissionCallback>) {
     this.agent = agent;
     this.pm = pm ?? null;
     this.rl = createInterface({ input: process.stdin, output: process.stderr });
+    this.interactionMode = this.agent.getInteractionMode();
     // Rebind the confirm callback to use the shared readline
     if (confirmCb && pm) {
       const shared = createPermissionCallback(pm, this.rl);
@@ -342,7 +344,7 @@ export class REPL {
         const plans = this.agent.getPlans();
         const activePlanEntry = plans.find(p => p.name === activePlanName);
         if (activePlanEntry) {
-          console.error(`  ${C.green}>${C.reset} ${activePlanEntry.name}  ${C.dim}${activePlanEntry.path}${C.reset}`);
+          console.error(`  ${C.green}> ${activePlanEntry.name}${C.reset}  ${C.dim}${activePlanEntry.path}${C.reset}`);
         }
       }
     }
@@ -528,7 +530,8 @@ export class REPL {
                 }
                 const icon = chunk.success ? `${C.green}✓` : `${C.red}✗`;
                 const preview = (chunk.content || '').slice(0, 150).split('\n')[0];
-                process.stderr.write(`  ${icon} ${C.dim}[${endLabel}]${C.reset} ${C.dim}${preview}${(chunk.content || '').length > 150 ? '...' : ''}${C.reset}\n`);
+                const refSuffix = chunk.resultRefId != null ? ` ${C.cyan}[result #${chunk.resultRefId}]${C.reset}` : '';
+                process.stderr.write(`  ${icon} ${C.dim}[${endLabel}]${C.reset} ${C.dim}${preview}${(chunk.content || '').length > 150 ? '...' : ''}${C.reset}${refSuffix}\n`);
                 break;
               }
               case 'done':
@@ -632,7 +635,8 @@ export class REPL {
         console.error(`  ${C.cyan}/memory${C.reset}                Show all memory + stats`);
         console.error(`  ${C.cyan}/memory global${C.reset}         Show global memory`);
         console.error(`  ${C.cyan}/memory project${C.reset}        Show project memory`);
-        console.error(`  ${C.cyan}/memory clear <scope>${C.reset}  Clear memory (project or all)`);
+        console.error(`  ${C.cyan}/memory clear <scope>${C.reset}  Clear memory (session, project, or all)`);
+        console.error(`  ${C.cyan}/clear [scope]${C.reset}         Alias for /memory clear (default: session)`);
         console.error(`  ${C.cyan}/plan${C.reset}                  Show current plan`);
         console.error(`  ${C.cyan}/plan list${C.reset}             List all plans`);
         console.error(`  ${C.cyan}/plan use <name>${C.reset}       Activate an older plan`);
@@ -710,6 +714,23 @@ export class REPL {
       }
 
       // ── /memory ───────────────────────────────────────────────────────
+      case 'clear': {
+        const scope = args[0]?.toLowerCase() || 'session';
+        if (scope === 'session') {
+          this.agent.clearSession();
+          console.error(`${C.yellow}Session cleared. Memory, plans, tasks, history, checkpoints, content, and cached results were kept.${C.reset}\n`);
+        } else if (scope === 'project') {
+          await this.agent.clearProject();
+          console.error(`${C.yellow}Project memory, plans, tasks, history, checkpoints, session state, content refs, and cached results cleared.${C.reset}\n`);
+        } else if (scope === 'all') {
+          await this.agent.clearAll();
+          console.error(`${C.yellow}All memory cleared.${C.reset}\n`);
+        } else {
+          console.error(`${C.dim}Usage: /clear [session|project|all]${C.reset}\n`);
+        }
+        break;
+      }
+
       case 'memory': {
         const subCmd = args[0]?.toLowerCase();
         if (subCmd === 'global') {
@@ -720,14 +741,17 @@ export class REPL {
           console.error(content ? `${C.bold}Project memory:${C.reset}\n${renderMarkdown(content)}\n` : `${C.dim}No project memory yet.${C.reset}\n`);
         } else if (subCmd === 'clear') {
           const scope = args[1]?.toLowerCase();
-          if (scope === 'project') {
+          if (scope === 'session') {
+            this.agent.clearSession();
+            console.error(`${C.yellow}Session cleared. Memory, plans, tasks, history, checkpoints, content, and cached results were kept.${C.reset}\n`);
+          } else if (scope === 'project') {
             await this.agent.clearProject();
-            console.error(`${C.yellow}Project memory, plans, and history cleared.${C.reset}\n`);
+            console.error(`${C.yellow}Project memory, plans, tasks, history, checkpoints, session state, content refs, and cached results cleared.${C.reset}\n`);
           } else if (scope === 'all') {
             await this.agent.clearAll();
             console.error(`${C.yellow}All memory cleared.${C.reset}\n`);
           } else {
-            console.error(`${C.dim}Usage: /memory clear project  or  /memory clear all${C.reset}\n`);
+            console.error(`${C.dim}Usage: /memory clear session  or  /memory clear project  or  /memory clear all${C.reset}\n`);
           }
         } else {
           // Show all memory + stats
@@ -757,7 +781,12 @@ export class REPL {
           if (plans.length === 0) { console.error(`${C.dim}No plans yet.${C.reset}\n`); break; }
           const activeName = this.agent.getActivePlanName();
           console.error(`${C.bold}Plans (${plans.length}):${C.reset}`);
-          plans.forEach(p => console.error(`  ${p.name === activeName ? C.green + '>' : ' '} ${p.name}  ${C.dim}${p.path}${C.reset}`));
+          plans.forEach(p => {
+            const isActive = activeName != null && p.name === activeName;
+            const prefix = isActive ? `${C.green}>` : ' ';
+            const name = isActive ? `${C.green}${p.name}${C.reset}` : p.name;
+            console.error(`  ${prefix} ${name}  ${C.dim}${p.path}${C.reset}`);
+          });
           console.error('');
         } else if (subCmd === 'use' && args[1]) {
           const name = args.slice(1).join(' ');
@@ -1232,6 +1261,7 @@ export class REPL {
   private buildFooterData(turn: number): FooterData {
     const tracker = this.agent.getContextTracker();
     return {
+      mode: this.interactionMode,
       model: this.agent.getModel(),
       contextPct: tracker.getContextPct(),
       contextUsed: tracker.getUsedTokens() ?? 0,
@@ -1250,7 +1280,15 @@ export class REPL {
       const savedDataListeners = process.stdin.rawListeners('data');
       process.stdin.removeAllListeners('data');
       try {
-        const result = await readLine(prompt, this.completionEngine, { footer });
+        const result = await readLine(prompt, this.completionEngine, {
+          footer,
+          onShiftTab: () => {
+            this.interactionMode = this.interactionMode === 'plan' ? 'auto' : 'plan';
+            this.agent.setInteractionMode(this.interactionMode);
+            saveConfig({ interactionMode: this.interactionMode });
+            if (footer) footer.mode = this.interactionMode;
+          },
+        });
         return result.text;
       } finally {
         // Restore readline's data listeners before resuming

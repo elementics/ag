@@ -76,6 +76,8 @@ export interface Tool {
   type: 'function';
   function: ToolDefinition;
   permissionKey?: PermissionKey;
+  /** Mark tool as plan-mode safe. `true` = all actions; `string[]` = only listed action values. */
+  readOnly?: true | string[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tools destructure their own typed params from parsed JSON
   execute: (args: any) => Promise<string> | string;
 }
@@ -85,6 +87,8 @@ export interface ToolDefinition {
   description: string;
   parameters: { type: 'object'; properties: Record<string, unknown>; required: string[] };
 }
+
+export type InteractionMode = 'plan' | 'auto';
 
 /** Return 'allow' to proceed, 'deny' to skip the tool call */
 export type ConfirmToolCall = (toolName: string, args: Record<string, unknown>, permissionKey?: PermissionKey) => Promise<'allow' | 'deny'>;
@@ -111,6 +115,7 @@ export interface AgentConfig {
   noSubAgents?: boolean;
   silent?: boolean;
   contextLength?: number;
+  interactionMode?: InteractionMode;
 }
 
 export interface StreamChunk {
@@ -118,6 +123,7 @@ export interface StreamChunk {
   content?: string;
   toolName?: string;
   toolCallId?: string;
+  resultRefId?: number;
   success?: boolean;
 }
 

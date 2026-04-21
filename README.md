@@ -180,7 +180,7 @@ All action-based tools follow the pattern: `tool(action, ...params)`.
 | `plan` | `save`, `append`, `switch`, `list`, `read` | Manage task plans |
 | `git` | `status`, `init`, `branch`, `commit`, `push` | Git workflow |
 | `grep` | `search`, `find` | Search file contents (regex), find files by glob |
-| `web` | `fetch`, `search` | Fetch web pages, search for current info |
+| `web` | `fetch`, `search` | Read-only web fetch and search for current info |
 | `content` | `add`, `list`, `paste`, `screenshot`, `clear` | Attach images/PDFs to messages |
 | `task` | `create`, `list`, `update`, `read`, `remove`, `clear` | Track tasks for multi-step work |
 | `result` | `get`, `info` | Retrieve cached tool results by ref ID |
@@ -288,6 +288,25 @@ Now permission patterns can target specific argument values:
 - `value` (optional) — arg name whose value is matched by the glob portion. E.g., `{ qualifier: "action", value: "path" }` produces `mytool(read:configs/**)`.
 
 Without `permissionKey`, the only available pattern is `toolname(*)`.
+
+### Read-Only (Plan Mode)
+
+By default, custom tools are blocked in plan mode. To allow some or all actions, add `readOnly` to your tool:
+
+```js
+export default {
+  type: "function",
+  function: { name: "snippet", /* ... */ },
+  readOnly: ["search", "get", "list"],  // these actions work in plan mode
+  execute: async ({ action }) => { /* ... */ }
+};
+```
+
+- `readOnly: true` — all actions are allowed in plan mode
+- `readOnly: ["action1", "action2"]` — only listed action values are allowed
+- Omit `readOnly` — tool is blocked in plan mode (default)
+
+Read-only custom tools also skip the permission prompt, just like built-in read-only tools.
 
 ## Skills
 
@@ -498,11 +517,14 @@ Persistent settings are stored in `~/.ag/config.json`:
   "baseURL": "https://openrouter.ai/api/v1",
   "maxIterations": 25,
   "tavilyApiKey": "tvly-...",
-  "contextLength": 131072
+  "contextLength": 131072,
+  "interactionMode": "plan"
 }
 ```
 
 Set values via the REPL (`/config set model openai/gpt-4o`) or edit the file directly. Remove a value with `/config unset <key>` to revert to the default. CLI flags and environment variables always take priority over config file values.
+
+`interactionMode` controls the default interactive mode for the REPL. It persists across restarts and defaults to `plan`. One-shot runs (`ag "..."`) always start in `auto`.
 
 For web search, get a free Tavily API key at [tavily.com](https://tavily.com) (no credit card needed). The agent prompts for it on first use, or set it manually:
 
@@ -619,9 +641,9 @@ Deny rules always override allow rules. Use `/permissions` to manage rules inter
 
 ### Built-in Classifications
 
-**Always allowed (no prompt):** `file(read)`, `file(list)`, `grep(*)`, `memory(*)`, `plan(*)`, `skill(*)`, `git(status)`, `web(search)`, `task(*)`, `agent(*)`, `content(*)`, `result(*)`, `history(*)`
+**Always allowed (no prompt):** `file(read)`, `file(list)`, `grep(*)`, `memory(*)`, `plan(*)`, `skill(*)`, `git(status)`, `web(fetch)`, `web(search)`, `task(*)`, `agent(*)`, `content(*)`, `result(*)`, `history(*)`
 
-**Prompted:** `bash`, `file(write)`, `file(edit)`, `git(commit/push/branch)`, `web(fetch)`
+**Prompted:** `bash`, `file(write)`, `file(edit)`, `git(commit/push/branch)`
 
 **Always blocked:** `rm -rf /`, fork bombs, `sudo rm`, pipe-to-shell (enforced in code regardless of approval)
 
@@ -668,6 +690,17 @@ agent> The Agent class is defined in src/agent.ts...
 
 Tools execute in parallel when the model returns multiple tool calls.
 
+## Interaction Modes
+
+Interactive REPL sessions start in `plan` mode by default. One-shot runs (`ag "..."`) start in `auto` mode.
+
+- `plan` mode is for discussion, investigation, web research, and creating or updating plans/tasks
+- `auto` mode is for carrying work through to execution
+- Press `Shift-Tab` at the prompt to toggle modes
+- The footer shows the current mode before the model name and the REPL persists the selected mode across restarts
+
+In `plan` mode, ag can use read-only tools such as `file(read|list)`, `grep`, `git(status)`, `memory`, `plan`, `task`, `result`, `history`, `content`, and `web(fetch|search)`, but it blocks file edits/writes, `bash`, and sub-agent spawning until you switch back to `auto`.
+
 ## Workflow
 
 - Environment context (date, OS, git branch, detected stack) is injected into every system prompt.
@@ -675,7 +708,8 @@ Tools execute in parallel when the model returns multiple tool calls.
 - `tool_choice: "auto"` encourages tool use over conversational responses.
 - Dangerous bash commands (`find ~`, `rm -rf /`, etc.) are blocked before execution.
 - Tool results over 32KB are smart-truncated (first 100 + last 100 lines) to preserve context.
-- For multi-step coding tasks, the agent creates a plan before starting and updates it as it goes.
+- Interactive sessions default to `plan` mode so you can review an approach before execution; switch to `auto` when you want the agent to carry out changes.
+- For multi-step coding tasks, the agent proposes a plan first, then creates or updates tasks as it works.
 - For simple questions, it just answers directly.
 - At 200 iterations the REPL asks if you want to continue.
 - Large tool results (>2KB) are cached to disk and replaced with summaries on subsequent turns — the LLM can retrieve full content on demand via `result(action=get)`.

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { getPlanModeBlockReason } from '../../core/agent.js';
 
 /**
  * Structural tests for the REPL's raw-mode / interrupt handling.
@@ -58,5 +59,50 @@ describe('REPL interrupt handling — raw mode invariant', () => {
     const finallyMatch = runAgentBody.match(/finally\s*\{[\s\S]*\}/);
     expect(finallyMatch).not.toBeNull();
     expect(finallyMatch![0]).toMatch(/removeListener\s*\(\s*['"]keypress['"]/);
+  });
+
+  it('shows result ref ids in tool_end output when available', () => {
+    expect(replSource).toMatch(/resultRefId != null/);
+    expect(replSource).toMatch(/\[result #\$\{chunk\.resultRefId\}\]/);
+  });
+
+  it('persists interaction mode changes on Shift-Tab', () => {
+    expect(replSource).toMatch(/saveConfig\(\{ interactionMode: this\.interactionMode \}\)/);
+  });
+
+  it('documents clear alias and session clear scope in help output', () => {
+    expect(replSource).toMatch(/\/memory clear <scope>.*session, project, or all/);
+    expect(replSource).toMatch(/\/clear \[scope\].*Alias for \/memory clear/);
+  });
+
+  it('handles clear alias with session default', () => {
+    expect(replSource).toMatch(/case 'clear':/);
+    expect(replSource).toMatch(/const scope = args\[0\]\?\.toLowerCase\(\) \|\| 'session'/);
+  });
+});
+
+describe('interaction mode enforcement', () => {
+  it('allows read-only file access in plan mode', () => {
+    expect(getPlanModeBlockReason('file', { action: 'read', path: 'src/app.ts' })).toBeNull();
+  });
+
+  it('allows plan operations in plan mode', () => {
+    expect(getPlanModeBlockReason('plan', { action: 'save', content: 'draft plan' })).toBeNull();
+  });
+
+  it('allows web fetch in plan mode', () => {
+    expect(getPlanModeBlockReason('web', { action: 'fetch', url: 'https://example.com' })).toBeNull();
+  });
+
+  it('blocks bash in plan mode', () => {
+    expect(getPlanModeBlockReason('bash', { command: 'npm test' })).toContain('bash execution is disabled');
+  });
+
+  it('blocks agent spawning in plan mode', () => {
+    expect(getPlanModeBlockReason('agent', { prompt: 'implement the feature' })).toContain('sub-agents are disabled');
+  });
+
+  it('blocks file edits in plan mode', () => {
+    expect(getPlanModeBlockReason('file', { action: 'edit', path: 'src/app.ts' })).toContain('file is not allowed');
   });
 });

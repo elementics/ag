@@ -59,6 +59,7 @@ async function main(): Promise<void> {
   const autoApprove = options.yes || positional.length > 0 || config.autoApprove === true;
   const pm = autoApprove ? undefined : new PermissionManager(process.cwd());
   const confirmToolCall = pm ? createPermissionCallback(pm) : undefined;
+  const interactionMode = positional.length > 0 ? 'auto' : (config.interactionMode ?? 'plan');
 
   const agent = new Agent({
     apiKey,
@@ -67,6 +68,7 @@ async function main(): Promise<void> {
     systemPrompt: options.system || config.systemPrompt,
     maxIterations: options.maxIterations || config.maxIterations,
     contextLength: config.contextLength,
+    interactionMode,
     extraTools,
     toolFailures,
     confirmToolCall,

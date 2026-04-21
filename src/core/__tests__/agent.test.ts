@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { truncateToolResult, raceAll, fetchWithRetry, Agent } from '../agent.js';
+import { truncateToolResult, raceAll, fetchWithRetry, Agent, parseToolArguments } from '../agent.js';
 
 describe('truncateToolResult', () => {
   it('returns short results unchanged', () => {
@@ -57,6 +57,34 @@ describe('truncateToolResult', () => {
 
   it('handles single line', () => {
     expect(truncateToolResult('single line')).toBe('single line');
+  });
+});
+
+describe('parseToolArguments', () => {
+  it('parses valid JSON unchanged', () => {
+    expect(parseToolArguments('{"action":"search","query":"test"}')).toEqual({ action: 'search', query: 'test' });
+  });
+
+  it('repairs code fences and trailing commas', () => {
+    expect(parseToolArguments('```json\n{"action":"fetch","url":"https://example.com",}\n```')).toEqual({
+      action: 'fetch',
+      url: 'https://example.com',
+    });
+  });
+
+  it('repairs truncated closing braces', () => {
+    expect(parseToolArguments('{"action":"search","query":"latest status"')).toEqual({
+      action: 'search',
+      query: 'latest status',
+    });
+  });
+
+  it('returns null for non-object JSON', () => {
+    expect(parseToolArguments('["not","an","object"]')).toBeNull();
+  });
+
+  it('returns null when repair cannot recover valid JSON', () => {
+    expect(parseToolArguments('action=search query=test')).toBeNull();
   });
 });
 
@@ -292,5 +320,92 @@ describe('local model support', () => {
       noHistory: true,
     });
     expect(agent.getContextTracker().getContextLength()).toBeNull();
+  });
+});
+
+describe('result ref caching in agent loop', () => {
+  const origFetch = globalThis.fetch;
+  const fakeHome = `/tmp/__ag_test_home_${Math.random().toString(16).slice(2)}__`;
+  const fakeCwd = `/tmp/__ag_test_agent_results_${Math.random().toString(16).slice(2)}__`;
+
+  afterEach(async () => {
+    globalThis.fetch = origFetch;
+    vi.restoreAllMocks();
+    vi.resetModules();
+    vi.doUnmock('node:os');
+    const { existsSync, rmSync } = await import('node:fs');
+    if (existsSync(fakeHome)) rmSync(fakeHome, { recursive: true });
+    if (existsSync(fakeCwd)) rmSync(fakeCwd, { recursive: true });
+  });
+
+  it('caches raw tool output while streaming the truncated preview and result ref id', async () => {
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(fakeHome, { recursive: true });
+    mkdirSync(fakeCwd, { recursive: true });
+
+    vi.doMock('node:os', async () => {
+      const actual = await vi.importActual<typeof import('node:os')>('node:os');
+      return { ...actual, homedir: () => fakeHome };
+    });
+
+    const memory = await import('../../memory/memory.js');
+    vi.spyOn(memory, 'loadContext').mockReturnValue('');
+
+    const [{ Agent: IsolatedAgent, truncateToolResult: isolatedTruncate }, results] = await Promise.all([
+      import('../agent.js'),
+      import('../results.js'),
+    ]);
+    const { getResultRef, resolveResult, clearResultCache, resetResultStore } = results;
+
+    resetResultStore();
+    clearResultCache(fakeCwd);
+
+    const rawLines = Array.from({ length: 400 }, (_, i) => `line ${i + 1}: ${'x'.repeat(120)}`);
+    const rawOutput = rawLines.join('\n');
+    const previewOutput = isolatedTruncate(rawOutput);
+    const bigTool = {
+      type: 'function' as const,
+      function: {
+        name: 'bigtool',
+        description: 'Returns a large payload.',
+        parameters: { type: 'object' as const, properties: {}, required: [] },
+      },
+      execute: async () => rawOutput,
+    };
+
+    const sse = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"bigtool","arguments":"{}"}}]}}]}',
+      'data: {"choices":[{"finish_reason":"tool_calls"}]}',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+    globalThis.fetch = vi.fn(async () => new Response(sse, { status: 200 })) as unknown as typeof fetch;
+
+    const agent = new IsolatedAgent({
+      baseURL: 'http://localhost:11434/v1',
+      model: 'gemma4',
+      cwd: fakeCwd,
+      noHistory: true,
+      noSubAgents: true,
+      maxIterations: 1,
+      extraTools: [bigTool],
+      interactionMode: 'auto',
+    });
+
+    const chunks = [];
+    for await (const chunk of agent.chatStream('run bigtool')) {
+      chunks.push(chunk);
+    }
+
+    const toolEnd = chunks.find(chunk => chunk.type === 'tool_end');
+    expect(toolEnd).toBeDefined();
+    expect(toolEnd?.content).toBe(previewOutput);
+    expect(toolEnd?.resultRefId).toBe(1);
+
+    const ref = getResultRef(1);
+    expect(ref).toBeDefined();
+    expect(ref?.size_chars).toBe(rawOutput.length);
+    expect(resolveResult(ref!)).toBe(rawOutput);
+    expect(resolveResult(ref!)).not.toBe(previewOutput);
   });
 });

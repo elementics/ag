@@ -71,6 +71,7 @@ export function agentTool(parentAgent: Agent): Tool {
         noSubAgents: true,
         silent: true,
         systemPromptSuffix: suffix,
+        interactionMode: parentAgent.getInteractionMode(),
       });
 
       // Load extensions so sub-agent events fire for extension observers

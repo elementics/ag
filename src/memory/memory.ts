@@ -44,8 +44,8 @@ export function paths(cwd: string = process.cwd()) {
 export function loadGlobalMemory(cwd?: string): string { return read(paths(cwd).globalMemory); }
 export function loadProjectMemory(cwd?: string): string { return read(paths(cwd).projectMemory); }
 export function loadPlan(cwd?: string): string {
-  const latest = latestPlanPath(cwd);
-  return latest ? read(latest) : '';
+  const active = explicitPlanPath(cwd);
+  return active ? read(active) : '';
 }
 
 /** List all plan files sorted newest first */
@@ -73,19 +73,14 @@ function currentPointerPath(cwd?: string): string {
   return join(paths(cwd).plansDir, '.current');
 }
 
-function latestPlanPath(cwd?: string): string | null {
-  // Check .current pointer first
+/** Returns the explicitly activated plan path, or null if no .current pointer. */
+function explicitPlanPath(cwd?: string): string | null {
   const pointer = currentPointerPath(cwd);
-  if (existsSync(pointer)) {
-    const name = readFileSync(pointer, 'utf-8').trim();
-    if (name) {
-      const target = join(paths(cwd).plansDir, name);
-      if (existsSync(target) && statSync(target).size > 0) return target;
-    }
-  }
-  // Fall back to newest by timestamp
-  const plans = listPlans(cwd);
-  return plans.length > 0 ? plans[0].path : null;
+  if (!existsSync(pointer)) return null;
+  const name = readFileSync(pointer, 'utf-8').trim();
+  if (!name) return null;
+  const target = join(paths(cwd).plansDir, name);
+  return existsSync(target) && statSync(target).size > 0 ? target : null;
 }
 
 /** Build a system prompt prefix from all memory tiers (capped to avoid context bloat) */
@@ -359,7 +354,7 @@ export function setActivePlan(name: string, cwd?: string): void {
 }
 
 export function getActivePlanName(cwd?: string): string | null {
-  const active = latestPlanPath(cwd);
+  const active = explicitPlanPath(cwd);
   if (!active) return null;
   return active.split('/').pop()!.replace('.md', '');
 }
@@ -380,7 +375,7 @@ export function savePlan(content: string, name?: string, cwd?: string): string {
 }
 
 export function appendPlan(content: string, cwd?: string): string {
-  const existing = latestPlanPath(cwd);
+  const existing = explicitPlanPath(cwd);
   if (existing) {
     const prefix = readFileSync(existing, 'utf-8').trim().length > 0 ? '\n' : '';
     appendFileSync(existing, prefix + content);
@@ -484,6 +479,13 @@ export function clearProject(cwd?: string): void {
   clearResultCache(cwd || process.cwd());
   // Checkpoints are cleared by agent.clearProject() via checkpointStore.clear()
   // Clear session state
+  if (existsSync(p.sessionState)) unlinkSync(p.sessionState);
+}
+
+export function clearSession(cwd?: string): void {
+  const p = paths(cwd);
+  const pointer = currentPointerPath(cwd);
+  if (existsSync(pointer)) unlinkSync(pointer);
   if (existsSync(p.sessionState)) unlinkSync(p.sessionState);
 }
 

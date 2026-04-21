@@ -4,14 +4,11 @@
  * Fallback: native Node.js when rg is not installed
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { Tool } from '../core/types.js';
 import { AG_DIR, DEFAULT_IGNORE, isBinary } from '../core/constants.js';
-
-const execFileAsync = promisify(execFile);
 
 const MAX_SEARCH_LINES = 250;
 const MAX_FIND_RESULTS = 100;
@@ -21,7 +18,7 @@ const MAX_FILE_SIZE = 1_048_576; // 1 MB
 
 async function tryRg(args: string[], cwd: string): Promise<{ ok: boolean; out: string; notFound: boolean }> {
   try {
-    const { stdout } = await execFileAsync('rg', args, {
+    const stdout = execFileSync('rg', args, {
       cwd, encoding: 'utf-8', timeout: 30_000, maxBuffer: 2 * 1024 * 1024,
     });
     return { ok: true, out: stdout.trim(), notFound: false };
@@ -37,16 +34,17 @@ async function tryRg(args: string[], cwd: string): Promise<{ ok: boolean; out: s
 
 async function rgSearch(cwd: string, pattern: string, path?: string, glob?: string,
   caseInsensitive?: boolean, context?: number): Promise<string> {
-  const args = [pattern, '--line-number', '--no-heading', '--color', 'never', '--max-count', String(MAX_SEARCH_LINES)];
+  const args = ['--line-number', '--no-heading', '--color', 'never', '--max-count', String(MAX_SEARCH_LINES)];
   if (glob) args.push('--glob', glob);
   if (caseInsensitive) args.push('--ignore-case');
   if (context && context > 0) args.push('--context', String(context));
+  args.push(pattern);
   if (path) args.push(path);
 
   const result = await tryRg(args, cwd);
   if (result.notFound) return ''; // signal to use fallback
   if (!result.ok) return `Error: ${result.out}`;
-  return result.out || 'No matches found.';
+  return result.out;
 }
 
 async function rgFind(cwd: string, pattern: string, path?: string): Promise<string> {
@@ -56,7 +54,7 @@ async function rgFind(cwd: string, pattern: string, path?: string): Promise<stri
   const result = await tryRg(args, cwd);
   if (result.notFound) return ''; // signal to use fallback
   if (!result.ok) return `Error: ${result.out}`;
-  if (!result.out) return 'No matches found.';
+  if (!result.out) return '';
 
   const lines = result.out.split('\n');
   if (lines.length > MAX_FIND_RESULTS) {

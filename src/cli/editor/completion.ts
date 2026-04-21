@@ -2,7 +2,7 @@ import { readdirSync } from 'node:fs';
 import { resolve, dirname, basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { CompletionEngine, CompletionCandidate } from './types.js';
-import { CONFIG_KEYS, CONFIG_KEY_ALIASES } from '../../core/config.js';
+import { CONFIG_KEYS } from '../../core/config.js';
 import type { Agent } from '../../core/agent.js';
 
 // ── Slash command definitions ──────────────────────────────────────────────
@@ -10,7 +10,7 @@ import type { Agent } from '../../core/agent.js';
 const SLASH_COMMANDS = [
   'help', 'model', 'memory', 'plan', 'checkpoint', 'rewind',
   'context', 'config', 'tools', 'skill', 'content', 'permissions',
-  'perms', 'exit', 'quit',
+  'perms', 'clear', 'exit', 'quit',
 ];
 
 const SUBCOMMANDS: Record<string, string[]> = {
@@ -24,7 +24,10 @@ const SUBCOMMANDS: Record<string, string[]> = {
   content: ['add', 'list', 'paste', 'screenshot', 'clear'],
   permissions: ['allow', 'deny', 'save', 'clear', 'remove'],
   perms: ['allow', 'deny', 'save', 'clear', 'remove'],
+  clear: ['session', 'project', 'all'],
 };
+
+const MEMORY_CLEAR_SCOPES = ['session', 'project', 'all'];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -90,10 +93,7 @@ export function createCompletionEngine(agent: Agent): CompletionEngine {
   let modelFetchPromise: Promise<void> | null = null;
   let skillSearchCache: CompletionCandidate[] | null = null;
 
-  const allConfigKeys = [
-    ...CONFIG_KEYS,
-    ...Object.keys(CONFIG_KEY_ALIASES),
-  ];
+  const allConfigKeys = [...CONFIG_KEYS];
 
   function complete(textBeforeCursor: string): CompletionCandidate[] {
     // 1. Slash commands: /partial at start of input
@@ -116,6 +116,27 @@ export function createCompletionEngine(agent: Agent): CompletionEngine {
         if (matches.length > 0) return matches;
         // Fall through to model/other providers if no subcommand matches
       }
+    }
+
+    // 2b. Nested scopes: /memory clear partial and /clear partial
+    const memoryClearMatch = textBeforeCursor.match(/^\/memory\s+clear\s+(\w*)$/i);
+    if (memoryClearMatch) {
+      return prefixMatch(MEMORY_CLEAR_SCOPES, memoryClearMatch[1]);
+    }
+
+    const clearMatch = textBeforeCursor.match(/^\/clear\s+(\w*)$/i);
+    if (clearMatch) {
+      return prefixMatch(MEMORY_CLEAR_SCOPES, clearMatch[1]);
+    }
+
+    // 2c. Plan use: /plan use partial
+    const planUseMatch = textBeforeCursor.match(/^\/plan\s+use\s+(.*)$/i);
+    if (planUseMatch) {
+      const partial = planUseMatch[1].toLowerCase();
+      const plans = agent.getPlans();
+      return plans
+        .filter(p => p.name.toLowerCase().includes(partial))
+        .map(p => ({ text: p.name, display: p.name }));
     }
 
     // 3. Config keys: /config set|unset partial

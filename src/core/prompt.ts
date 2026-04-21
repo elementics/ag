@@ -5,7 +5,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import type { Message } from './types.js';
+import type { Message, Tool } from './types.js';
 import { resolveMessagesForAPI } from './content.js';
 
 // ── Environment context ─────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ const READ_ONLY_CALLS: Record<string, Set<string> | true> = {
   skill: true,                                         // activating skills is safe
   file: new Set(['read', 'list']),                     // only read/list are safe
   git: new Set(['status']),                             // only status is safe
-  web: new Set(['search']),                             // search is safe, fetch needs confirm
+  web: true,                                           // built-in web operations are read-only
   task: true,                                          // all task actions are safe (internal state)
   agent: true,                                         // sub-agent spawning is safe (internal orchestration)
   content: true,                                        // all content actions are read-only
@@ -68,10 +68,13 @@ const READ_ONLY_CALLS: Record<string, Set<string> | true> = {
   history: true,                                        // all history actions are read-only
 };
 
-export function isReadOnlyToolCall(toolName: string, args: Record<string, unknown>): boolean {
+export function isReadOnlyToolCall(toolName: string, args: Record<string, unknown>, tool?: Tool): boolean {
   const rule = READ_ONLY_CALLS[toolName];
   if (rule === true) return true;
   if (rule instanceof Set) return rule.has(args.action as string);
+  // Custom tool self-declaration
+  if (tool?.readOnly === true) return true;
+  if (Array.isArray(tool?.readOnly)) return tool.readOnly.includes(args.action as string);
   return false;
 }
 

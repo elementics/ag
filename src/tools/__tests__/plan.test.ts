@@ -47,7 +47,7 @@ describe('plan tool', () => {
     await plan.execute({ action: 'save', content: 'specific content', name: 'readable' });
     const listResult = await plan.execute({ action: 'list' });
     // Extract the plan name from the list
-    const name = listResult.split('\n')[0].split('  ')[0].trim();
+    const name = listResult.split('\n').find(l => l.trimStart().startsWith('>') || /^\s{2}\S/.test(l))!.replace(/^>\s*/, '').split('  ')[0].trim();
     const result = await plan.execute({ action: 'read', name });
     expect(result).toContain('specific content');
   });

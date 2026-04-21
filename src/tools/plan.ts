@@ -1,12 +1,12 @@
 import { Tool } from '../core/types.js';
-import { savePlan, listPlans, loadPlanByName, appendPlan, setActivePlan } from '../memory/memory.js';
+import { savePlan, listPlans, loadPlanByName, appendPlan, setActivePlan, getActivePlanName } from '../memory/memory.js';
 
 export function planTool(cwd: string): Tool {
   return {
     type: 'function',
     function: {
       name: 'plan',
-      description: 'Manage task plans. Save a new plan, append to the latest plan, switch the active plan, list all plans, or read a specific plan by name. Plans are timestamped and the latest is automatically loaded as context.',
+      description: 'Manage task plans. Save a new plan, append to the active plan, switch the active plan, list all plans, or read a specific plan by name. Only the explicitly activated plan is loaded as context.',
       parameters: {
         type: 'object',
         properties: {
@@ -40,7 +40,10 @@ export function planTool(cwd: string): Tool {
         case 'list': {
           const plans = listPlans(cwd);
           if (plans.length === 0) return 'No plans saved yet.';
-          return plans.map(p => `${p.name}  ${p.path}`).join('\n');
+          const activeName = getActivePlanName(cwd);
+          const header = activeName ? `Active plan: ${activeName}` : 'No active plan. Use action=switch to activate one.';
+          const lines = plans.map(p => `${p.name === activeName ? '> ' : '  '}${p.name}  ${p.path}`);
+          return `${header}\n${lines.join('\n')}`;
         }
         case 'read': {
           if (!name) return 'Error: name is required for action=read. Use action=list to see available plans.';

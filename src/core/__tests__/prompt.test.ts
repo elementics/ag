@@ -15,6 +15,13 @@ describe('isReadOnlyToolCall — content tool', () => {
   });
 });
 
+describe('isReadOnlyToolCall — web tool', () => {
+  it('web tool is always read-only', () => {
+    expect(isReadOnlyToolCall('web', { action: 'search', query: 'latest news' })).toBe(true);
+    expect(isReadOnlyToolCall('web', { action: 'fetch', url: 'https://example.com' })).toBe(true);
+  });
+});
+
 // ── buildRequestBody with content ───────────────────────────────────────────
 
 const cwd = process.cwd();
