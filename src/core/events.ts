@@ -48,6 +48,8 @@ export interface ToolResultEvent {
   args: Record<string, unknown>;
   content: string;
   isError: boolean;
+  terminateTurn?: boolean;
+  terminationReason?: string;
 }
 
 export interface BeforeCompactEvent {

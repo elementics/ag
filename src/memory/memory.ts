@@ -415,6 +415,8 @@ export interface SessionState {
   summary: string;
   recentFileOps: { read: string[]; modified: string[] };
   activePlan: string | null;
+  turnStatus?: string;
+  workingState?: string;
 }
 
 export function saveSessionState(state: SessionState, cwd?: string): void {

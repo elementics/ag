@@ -2,14 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { ShadowGit } from '../shadow-git.js';
+import { Shadow } from '../shadow.js';
 
-const testDir = `/tmp/__ag_test_shadow_git_${randomBytes(8).toString('hex')}__`;
-let shadow: ShadowGit;
+const testDir = `/tmp/__ag_test_shadow_${randomBytes(8).toString('hex')}__`;
+let shadow: Shadow;
 
 beforeEach(async () => {
   mkdirSync(testDir, { recursive: true });
-  shadow = new ShadowGit(join(testDir, '.ag', 'shadow-git'), testDir);
+  shadow = new Shadow(join(testDir, '.ag', 'shadow'), testDir);
   await shadow.init();
 });
 
@@ -19,21 +19,21 @@ afterEach(() => {
 
 // ── isAvailable ─────────────────────────────────────────────────────────────
 
-describe('ShadowGit.isAvailable', () => {
+describe('Shadow.isAvailable', () => {
   it('returns true when git is installed', async () => {
-    expect(await ShadowGit.isAvailable()).toBe(true);
+    expect(await Shadow.isAvailable()).toBe(true);
   });
 });
 
 // ── init ────────────────────────────────────────────────────────────────────
 
-describe('ShadowGit.init', () => {
+describe('Shadow.init', () => {
   it('creates a bare git repo in the shadow directory', () => {
-    expect(existsSync(join(testDir, '.ag', 'shadow-git', 'HEAD'))).toBe(true);
+    expect(existsSync(join(testDir, '.ag', 'shadow', 'HEAD'))).toBe(true);
   });
 
   it('writes exclusion patterns', () => {
-    const exclude = readFileSync(join(testDir, '.ag', 'shadow-git', 'info', 'exclude'), 'utf-8');
+    const exclude = readFileSync(join(testDir, '.ag', 'shadow', 'info', 'exclude'), 'utf-8');
     expect(exclude).toContain('.git');
     expect(exclude).toContain('node_modules');
     expect(exclude).toContain('.ag');
@@ -41,13 +41,13 @@ describe('ShadowGit.init', () => {
 
   it('is idempotent — safe to call on an existing repo', async () => {
     await shadow.init(); // second call should not throw
-    expect(existsSync(join(testDir, '.ag', 'shadow-git', 'HEAD'))).toBe(true);
+    expect(existsSync(join(testDir, '.ag', 'shadow', 'HEAD'))).toBe(true);
   });
 });
 
 // ── snapshot ────────────────────────────────────────────────────────────────
 
-describe('ShadowGit.snapshot', () => {
+describe('Shadow.snapshot', () => {
   it('captures a file and returns a commit SHA', async () => {
     writeFileSync(join(testDir, 'hello.txt'), 'world');
     const sha = await shadow.snapshot('first checkpoint');
@@ -105,7 +105,7 @@ describe('ShadowGit.snapshot', () => {
 
 // ── restore ─────────────────────────────────────────────────────────────────
 
-describe('ShadowGit.restore', () => {
+describe('Shadow.restore', () => {
   it('restores modified files to their checkpoint state', async () => {
     writeFileSync(join(testDir, 'file.txt'), 'original');
     const sha = await shadow.snapshot('baseline');
@@ -169,7 +169,7 @@ describe('ShadowGit.restore', () => {
 
 // ── diff ────────────────────────────────────────────────────────────────────
 
-describe('ShadowGit.diff', () => {
+describe('Shadow.diff', () => {
   it('returns diff between two snapshots', async () => {
     writeFileSync(join(testDir, 'file.txt'), 'version 1');
     const sha1 = await shadow.snapshot('v1');
@@ -185,7 +185,7 @@ describe('ShadowGit.diff', () => {
 
 // ── prune ───────────────────────────────────────────────────────────────────
 
-describe('ShadowGit.prune', () => {
+describe('Shadow.prune', () => {
   it('keeps only the last N snapshots', async () => {
     const shas: string[] = [];
     for (let i = 0; i < 5; i++) {
@@ -205,12 +205,12 @@ describe('ShadowGit.prune', () => {
 
 // ── corruption recovery ─────────────────────────────────────────────────────
 
-describe('ShadowGit - corruption recovery', () => {
+describe('Shadow - corruption recovery', () => {
   it('reinitializes if shadow repo is corrupted', async () => {
-    writeFileSync(join(testDir, '.ag', 'shadow-git', 'HEAD'), 'corrupted');
+    writeFileSync(join(testDir, '.ag', 'shadow', 'HEAD'), 'corrupted');
 
     // Create a fresh instance — init should recover
-    const fresh = new ShadowGit(join(testDir, '.ag', 'shadow-git'), testDir);
+    const fresh = new Shadow(join(testDir, '.ag', 'shadow'), testDir);
     await fresh.init();
 
     writeFileSync(join(testDir, 'test.txt'), 'after recovery');

@@ -35,8 +35,8 @@ export function formatMessagesForCompaction(messages: Message[]): string[] {
   for (const m of messages) {
     let line: string;
     if (m.tool_calls?.length) {
-      const names = m.tool_calls.map(tc => tc.function.name).join(', ');
-      line = `[assistant]: (tool call: ${names})`;
+      const calls = m.tool_calls.map(formatToolCallForCompaction).join('; ');
+      line = `[assistant]: (tool call: ${calls})`;
     } else if (m.role === 'tool') {
       line = `[tool result]: ${getTextContent(m).slice(0, COMPACT_MSG_CHARS)}`;
     } else {
@@ -59,6 +59,27 @@ export function formatMessagesForCompaction(messages: Message[]): string[] {
     formatted.push(line);
   }
   return formatted;
+}
+
+function formatToolCallForCompaction(tc: NonNullable<Message['tool_calls']>[number]): string {
+  let args: Record<string, unknown> = {};
+  try { args = JSON.parse(tc.function.arguments || '{}') as Record<string, unknown>; } catch { /* malformed */ }
+  switch (tc.function.name) {
+    case 'file':
+      return compactParts('file', String(args.action ?? ''), String(args.path ?? ''));
+    case 'bash':
+      return compactParts('bash', String(args.command ?? '').slice(0, 220));
+    case 'grep':
+      return compactParts('grep', String(args.action ?? ''), String(args.query ?? args.pattern ?? '').slice(0, 160), String(args.path ?? ''));
+    case 'git':
+      return compactParts('git', String(args.action ?? ''), String(args.args ?? '').slice(0, 160));
+    default:
+      return tc.function.name;
+  }
+}
+
+function compactParts(...parts: string[]): string {
+  return parts.filter(Boolean).join(' ');
 }
 
 // ── Compaction ──────────────────────────────────────────────────────────────

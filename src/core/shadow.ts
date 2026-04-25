@@ -1,5 +1,5 @@
 /**
- * Shadow git — bare git repo for checkpoint snapshots.
+ * Shadow — bare git-backed repo for checkpoint snapshots.
  *
  * Uses GIT_DIR / GIT_WORK_TREE to snapshot the project working tree
  * without touching the user's .git. Pattern used by Cline, Roo Code,
@@ -30,7 +30,7 @@ export interface SnapshotInfo {
   timestamp: string;
 }
 
-export class ShadowGit {
+export class Shadow {
   constructor(
     private readonly shadowDir: string,
     private readonly workTree: string,
@@ -135,6 +135,19 @@ export class ShadowGit {
   /** Return a unified diff between two snapshot SHAs. */
   async diff(sha1: string, sha2: string): Promise<string> {
     return this.git(['diff', sha1, sha2]);
+  }
+
+  /** Return diff stat between current working tree and a snapshot SHA. */
+  async diffStatFrom(sha: string): Promise<string> {
+    await this.git(['add', '-A']);
+    return this.git(['diff', '--cached', '--stat', sha]);
+  }
+
+  /** Return unified diff between current working tree and a snapshot SHA. */
+  async diffFrom(sha: string, maxChars = 12000): Promise<string> {
+    await this.git(['add', '-A']);
+    const diff = await this.git(['diff', '--cached', sha]);
+    return diff.length <= maxChars ? diff : `${diff.slice(0, maxChars)}\n... [diff truncated]`;
   }
 
   // ── List files in a snapshot ────────────────────────────────────────────

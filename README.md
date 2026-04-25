@@ -143,7 +143,7 @@ All commands follow the pattern: `/noun` to show, `/noun subcommand` to act.
 /plan use <name>            Activate an older plan
 /checkpoint                 List all checkpoints
 /checkpoint create [label]  Create a named checkpoint
-/rewind                     Rewind to a checkpoint (interactive)
+/rewind                     Rewind to a checkpoint (interactive, with change preview)
 /rewind last                Quick rewind to most recent checkpoint
 /context                    Show context window usage with per-component breakdown
 /context compact            Force context compaction now
@@ -557,7 +557,8 @@ Three tiers, all plain markdown you can edit directly:
         index.json
       checkpoints/                 # checkpoint metadata
         index.json
-      shadow-git/                  # shadow git repo for checkpoint snapshots
+      shadow/                       # local shadow repo for checkpoint snapshots
+      traces/                       # JSONL run traces, rotated and pruned
       session-state.json           # session resume context
 ```
 
@@ -715,7 +716,9 @@ In `plan` mode, ag can use read-only tools such as `file(read|list)`, `grep`, `g
 - Large tool results (>2KB) are cached to disk and replaced with summaries on subsequent turns — the LLM can retrieve full content on demand via `result(action=get)`.
 - Large tool call arguments (file writes, edits) are collapsed after the introduction turn.
 - Turns with 3+ tool calls are automatically summarized; older turns are replaced with summaries in API calls. Tool outputs from older turns are masked to save context (the agent can retrieve them on demand via result refs).
-- Checkpoints are created automatically at each turn start using a shadow git repo, capturing all file changes (including those from bash commands). Use `/rewind` to roll back code, conversation, or both.
+- During each turn, ag keeps a compact working-state ledger of files changed, reads, verification commands, and loop guards. If the agent tries to edit/write the same file more than three times without reading it or running verification, the turn is stopped instead of continuing a blind edit loop.
+- Checkpoints are created automatically at each turn start using a local shadow repo, capturing all file changes (including those from bash commands). `/checkpoint` lists newest first. `/rewind` shows a diff stat preview before you choose whether to roll back code, conversation, or both.
+- Per-session JSONL traces are written under the project cache and automatically pruned: latest 20 trace files are kept, files older than 14 days are removed, and active trace files rotate after 10MB.
 - A rolling window of the last 10 user messages is maintained in the system prompt across sessions, so the agent always knows what you asked for.
 - The original user request is preserved through compaction — it always stays in context.
 - At 90% context window usage, ag automatically summarizes older interactions to free space, then injects a context reconstruction message with the active plan and recent files. Use `/context compact` to trigger manually. Only interaction history is compacted — system prompt, tools, skills, memory, and environment are unaffected. Use `/context` to see a per-component breakdown (system prompt, environment, global memory, skill catalog, tool definitions, custom tools, interactions).
@@ -754,8 +757,10 @@ src/
   core/permissions.ts # permission manager with glob pattern matching
   core/results.ts     # result ref cache (send-once for large tool outputs)
   core/summarization.ts # turn summarization (LLM-generated summaries)
-  core/checkpoint.ts  # checkpoint store (metadata + shadow git integration)
-  core/shadow-git.ts  # shadow git repo for whole-tree snapshots
+  core/ledger.ts      # per-turn working state, verification tracking, loop guards
+  core/traces.ts      # JSONL traces with cleanup and rotation
+  core/checkpoint.ts  # checkpoint store (metadata + shadow integration)
+  core/shadow.ts      # local shadow repo for whole-tree snapshots
   memory/memory.ts    # memory, plans, tasks, history, session state
   tools/agent.ts      # sub-agent spawning (in-process, parallel)
   tools/bash.ts       # shell execution + background processes

@@ -1,4 +1,4 @@
-import { Message, Tool, AgentConfig, StreamChunk, ConfirmToolCall, ContentBlock, ContentRef, InteractionMode } from './types.js';
+import { Message, Tool, AgentConfig, StreamChunk, ConfirmToolCall, ContentBlock, ContentRef, InteractionMode, type ToolExecutionResult } from './types.js';
 import { AgentEventEmitter, deriveProvider, type EventName, type EventHandler } from './events.js';
 import { discoverExtensions, loadExtensions, type ExtensionMeta } from './extensions.js';
 import { C } from './colors.js';
@@ -25,6 +25,8 @@ import { getEnvironmentContext, isReadOnlyToolCall, getProjectListing, buildRequ
 import { compactMessages, COMPACT_THRESHOLD, COMPACT_HEAD_KEEP, COMPACT_TAIL_KEEP } from './compaction.js';
 import { summarizeTurn, extractFileOps, TURN_SUMMARY_THRESHOLD, type TurnSummary } from './summarization.js';
 import { CheckpointStore } from './checkpoint.js';
+import { AgentLedger } from './ledger.js';
+import { TraceWriter } from './traces.js';
 import { randomBytes } from 'node:crypto';
 
 export const MAX_ITERATIONS_REACHED = '[Max iterations reached]';
@@ -36,6 +38,10 @@ export { getEnvironmentContext, isReadOnlyToolCall } from './prompt.js';
 const MAX_MESSAGES = 200;
 const MAX_EMPTY_RETRIES = 2;
 const MAX_CONSECUTIVE_TOOL_FAILURES = 3;
+
+function normalizeToolExecutionResult(result: string | ToolExecutionResult): ToolExecutionResult {
+  return typeof result === 'string' ? { content: result } : result;
+}
 
 function repairToolArguments(raw: string): string | null {
   const trimmed = raw.trim();
@@ -163,6 +169,8 @@ export class Agent implements SkillHost {
   private turnMessageStartIndex = 0;
   private checkpointStore: CheckpointStore | null = null;
   private resumedSession: import('../memory/memory.js').SessionState | null = null;
+  private readonly ledger = new AgentLedger();
+  private traceWriter: TraceWriter | null = null;
 
   constructor(config: AgentConfig = {}) {
     this.model = config.model || 'anthropic/claude-sonnet-4.6';
@@ -296,7 +304,7 @@ Before asking the user, re-running a broad search, or guessing, check context in
       if (sessionState) {
         this.messages = [{
           role: 'user',
-          content: `Resuming previous session. Here's where things stand:\n\n${sessionState.summary}\n\nRecent files read: ${sessionState.recentFileOps.read.join(', ') || 'none'}\nRecent files modified: ${sessionState.recentFileOps.modified.join(', ') || 'none'}${sessionState.activePlan ? `\nActive plan: ${sessionState.activePlan}` : ''}`,
+          content: `Resuming previous session. Here's where things stand:\n\n${sessionState.summary}\n\nRecent files read: ${sessionState.recentFileOps.read.join(', ') || 'none'}\nRecent files modified: ${sessionState.recentFileOps.modified.join(', ') || 'none'}${sessionState.activePlan ? `\nActive plan: ${sessionState.activePlan}` : ''}${sessionState.turnStatus ? `\nLast turn status: ${sessionState.turnStatus}` : ''}${sessionState.workingState ? `\n\n${sessionState.workingState}` : ''}`,
         }];
         this.currentTurn = sessionState.turnNumber;
         if (sessionState.sessionId) this.sessionId = sessionState.sessionId;
@@ -307,6 +315,8 @@ Before asking the user, re-running a broad search, or guessing, check context in
       restoreResultIndex(this.cwd);
       pruneContentCache(this.cwd);
       cleanupTasks(this.cwd);
+      this.contextTracker.setSessionId(this.sessionId);
+      this.traceWriter = new TraceWriter(this.cwd, this.sessionId);
       CheckpointStore.isAvailable().then(async (available) => {
         if (!available) {
           process.stderr.write(`${C.yellow}Checkpoints unavailable — git is required for checkpoint/rewind. Install git to enable.${C.reset}\n`);
@@ -396,9 +406,11 @@ Before asking the user, re-running a broad search, or guessing, check context in
     if (this.turnSummaries.size > 0) {
       messages = this.collapseOlderTurns(messages);
     }
+    const basePrompt = overrides?.systemPrompt ?? this.systemPrompt;
+    const workingState = this.ledger.contextAnchor();
     return buildRequestBody({
       model: this.model,
-      systemPrompt: overrides?.systemPrompt ?? this.systemPrompt,
+      systemPrompt: workingState ? `${basePrompt}\n\n${workingState}` : basePrompt,
       messages,
       tools: Array.from(this.tools.values()).map(t => ({ type: t.type, function: t.function })),
       stream,
@@ -462,6 +474,8 @@ Before asking the user, re-running a broad search, or guessing, check context in
       summary: summary || 'No activity to summarize.',
       recentFileOps: fileOps,
       activePlan: getActivePlanName(this.cwd),
+      turnStatus: this.ledger.getStatus(),
+      workingState: this.ledger.contextAnchor() || undefined,
     }, this.cwd);
   }
 
@@ -558,6 +572,12 @@ Before asking the user, re-running a broad search, or guessing, check context in
 
     this.currentTurn++;
     this.turnMessageStartIndex = this.messages.length; // Mark where this turn's messages begin
+    this.ledger.beginTurn(this.currentTurn);
+    this.traceWriter?.write('turn_start', {
+      turnNumber: this.currentTurn,
+      messageStartIndex: this.turnMessageStartIndex,
+      inputKind: typeof content === 'string' ? 'text' : 'content_blocks',
+    });
 
     // Set introduced_turn on any content refs
     if (Array.isArray(content)) {
@@ -594,6 +614,8 @@ Before asking the user, re-running a broad search, or guessing, check context in
 
       // ── Abort check: top of iteration ──
       if (signal?.aborted) {
+        this.ledger.markStatus('interrupted');
+        this.traceWriter?.write('turn_end', { turnNumber: this.currentTurn, status: 'interrupted', iteration: i });
         this.messages.push({ role: 'assistant', content: '[interrupted by user]' });
         yield { type: 'interrupted' };
         return;
@@ -673,6 +695,13 @@ Before asking the user, re-running a broad search, or guessing, check context in
       // ── Build request body and emit request_ready ──
       const url = `${this.baseURL}/chat/completions`;
       const requestBody = this.getRequestBody(true, { messages: reqEvent.messages, systemPrompt: reqEvent.systemPrompt });
+      this.traceWriter?.write('request', {
+        turnNumber: this.currentTurn,
+        iteration: i,
+        messageCount: this.messages.length,
+        toolCount: this.tools.size,
+        compacted: didCompact,
+      });
       await this.events.emit('request_ready', { url, body: requestBody });
 
       // ── API call with abort signal and retry ──
@@ -823,14 +852,17 @@ Before asking the user, re-running a broad search, or guessing, check context in
 
         // ── turn_end event (no tools) ──
         await this.events.emit('turn_end', { iteration: i, hadToolCalls: false, toolCallCount: 0 });
+        this.ledger.markStatus('completed');
+        this.traceWriter?.write('turn_end', { turnNumber: this.currentTurn, status: 'completed', iteration: i, toolCallCount: turnToolCallCount });
 
         // ── turn summarization (for turns with enough tool calls) ──
         if (turnToolCallCount >= TURN_SUMMARY_THRESHOLD && !this.silent) {
           const turnMsgs = this.messages.slice(this.turnMessageStartIndex);
-          summarizeTurn(turnMsgs, this.currentTurn, {
+          const summaryTurn = this.currentTurn;
+          summarizeTurn(turnMsgs, summaryTurn, {
             baseURL: this.baseURL, apiKey: this.apiKey, model: this.model,
           }, this.turnMessageStartIndex, true).then(summary => {
-            this.turnSummaries.set(this.currentTurn, summary);
+            this.turnSummaries.set(summaryTurn, summary);
             this.saveSessionState();
           }).catch(() => { /* summary failure is non-fatal */ });
         } else if (!this.silent) {
@@ -864,6 +896,7 @@ Before asking the user, re-running a broad search, or guessing, check context in
       // Permission checks — run sequentially so prompts don't overlap
       const permissionDecisions = new Map<string, 'allow' | 'deny'>();
       const modeBlocks = new Map<string, string>();
+      const guardStops = new Map<string, string>();
       for (const call of msg.tool_calls) {
         if (signal?.aborted) break;
         const tool = this.tools.get(call.function.name);
@@ -877,6 +910,14 @@ Before asking the user, re-running a broad search, or guessing, check context in
             modeBlocks.set(call.id, blockReason);
             continue;
           }
+        }
+        const guard = this.ledger.shouldBlockTool(call.function.name, args, i);
+        if (guard) {
+          permissionDecisions.set(call.id, 'deny');
+          modeBlocks.set(call.id, guard.reason);
+          guardStops.set(call.id, guard.reason);
+          this.traceWriter?.write('guard_stop', { turnNumber: this.currentTurn, iteration: i, toolName: call.function.name, reason: guard.reason, path: guard.path });
+          continue;
         }
         if (this.confirmToolCall && !isReadOnlyToolCall(call.function.name, args, tool)) {
           permissionDecisions.set(call.id, await this.confirmToolCall(call.function.name, args, tool.permissionKey));
@@ -898,7 +939,7 @@ Before asking the user, re-running a broad search, or guessing, check context in
         }
         const modeBlock = modeBlocks.get(call.id);
         if (modeBlock) {
-          return { call, content: modeBlock, rawContent: modeBlock, isError: true };
+          return { call, content: modeBlock, rawContent: modeBlock, isError: true, terminateTurn: guardStops.has(call.id), terminationReason: guardStops.get(call.id) };
         }
 
         if (permissionDecisions.get(call.id) === 'deny') {
@@ -916,28 +957,51 @@ Before asking the user, re-running a broad search, or guessing, check context in
         args = tcEvent.args as Record<string, unknown>;
 
         try {
-          const rawResult = await tool.execute(args);
+          this.traceWriter?.write('tool_call', { turnNumber: this.currentTurn, iteration: i, toolName: call.function.name, toolCallId: call.id, args });
+          const rawExecution = normalizeToolExecutionResult(await tool.execute(args));
+          const rawResult = rawExecution.content;
           const previewResult = truncateToolResult(rawResult);
           let result = previewResult;
           let isError = result.startsWith('Error:') || result.startsWith('EXIT ');
 
           // ── tool_result event ──
-          const trEvent = { toolName: call.function.name, toolCallId: call.id, args, content: result, isError };
+          const trEvent = {
+            toolName: call.function.name,
+            toolCallId: call.id,
+            args,
+            content: result,
+            isError,
+            terminateTurn: rawExecution.terminateTurn,
+            terminationReason: rawExecution.terminationReason,
+          };
           await this.events.emit('tool_result', trEvent);
           result = trEvent.content;
           isError = trEvent.isError;
+          this.ledger.recordToolResult(call.function.name, args, result, isError, i);
+          this.traceWriter?.write('tool_result', {
+            turnNumber: this.currentTurn,
+            iteration: i,
+            toolName: call.function.name,
+            toolCallId: call.id,
+            isError,
+            summary: result.slice(0, 500),
+            terminateTurn: trEvent.terminateTurn,
+            terminationReason: trEvent.terminationReason,
+          });
 
           const rawContent = trEvent.content === previewResult ? rawResult : trEvent.content;
-          return { call, content: result, rawContent, isError };
+          return { call, content: result, rawContent, isError, terminateTurn: trEvent.terminateTurn, terminationReason: trEvent.terminationReason };
         } catch (error) {
           const message = `Tool error: ${error}`;
+          this.ledger.recordToolResult(call.function.name, args, message, true, i);
+          this.traceWriter?.write('tool_result', { turnNumber: this.currentTurn, iteration: i, toolName: call.function.name, toolCallId: call.id, isError: true, summary: message });
           return { call, content: message, rawContent: message, isError: true };
         }
       });
 
       // Yield results as they resolve (not waiting for all)
       const completedCallIds = new Set<string>();
-      const execResults: Array<{ call: typeof msg.tool_calls[0]; content: string; rawContent: string; isError: boolean }> = [];
+      const execResults: Array<{ call: typeof msg.tool_calls[0]; content: string; rawContent: string; isError: boolean; terminateTurn?: boolean; terminationReason?: string }> = [];
       for await (const r of raceAll(execPromises)) {
         completedCallIds.add(r.call.id);
         execResults.push(r);
@@ -994,6 +1058,8 @@ Before asking the user, re-running a broad search, or guessing, check context in
 
       // Fill placeholders for any tool calls that didn't complete (API requires all tool_call_ids)
       if (signal?.aborted && msg.tool_calls) {
+        this.ledger.markStatus('interrupted');
+        this.traceWriter?.write('turn_end', { turnNumber: this.currentTurn, status: 'interrupted', iteration: i });
         for (const call of msg.tool_calls) {
           if (!completedCallIds.has(call.id)) {
             const placeholder: Message = { role: 'tool', tool_call_id: call.id, content: '[cancelled by user]' };
@@ -1003,6 +1069,19 @@ Before asking the user, re-running a broad search, or guessing, check context in
         }
         this.messages.push({ role: 'assistant', content: '[interrupted by user]' });
         yield { type: 'interrupted', content: `${completedCallIds.size} completed, ${msg.tool_calls.length - completedCallIds.size} cancelled` };
+        return;
+      }
+
+      const termination = execResults.find(r => r.terminateTurn);
+      if (termination) {
+        const reason = termination.terminationReason || 'Tool requested turn termination.';
+        if (this.ledger.getStatus() !== 'guard_stopped') this.ledger.markStatus('completed');
+        const finalMsg: Message = { role: 'assistant', content: reason, _turn: this.currentTurn };
+        this.messages.push(finalMsg);
+        this.appendToHistory(finalMsg);
+        this.saveSessionState();
+        this.traceWriter?.write('turn_end', { turnNumber: this.currentTurn, status: this.ledger.getStatus(), iteration: i, reason });
+        yield { type: 'done', content: reason };
         return;
       }
 
@@ -1030,6 +1109,8 @@ Before asking the user, re-running a broad search, or guessing, check context in
 
       await this.events.emit('turn_end', { iteration: i, hadToolCalls: true, toolCallCount: msg.tool_calls.length });
     }
+    this.ledger.markStatus('max_iterations');
+    this.traceWriter?.write('turn_end', { turnNumber: this.currentTurn, status: 'max_iterations' });
     yield { type: 'max_iterations' };
   }
 

@@ -815,7 +815,7 @@ export class REPL {
           console.error(`${C.green}Checkpoint #${cp.id} created${label ? `: ${label}` : ''}${C.reset}\n`);
         } else {
           // Default: list checkpoints
-          const list = store.list();
+          const list = store.list().slice().reverse();
           if (list.length === 0) { console.error(`${C.dim}No checkpoints yet.${C.reset}\n`); break; }
           const currentSession = this.agent.getSessionId();
           console.error(`${C.bold}Checkpoints (${list.length}):${C.reset}`);
@@ -844,7 +844,7 @@ export class REPL {
           // Show list and ask user to pick
           const currentSession = this.agent.getSessionId();
           console.error(`${C.bold}Checkpoints:${C.reset}`);
-          list.forEach(cp => {
+          list.slice().reverse().forEach(cp => {
             const ts = formatCheckpointTime(cp.timestamp);
             const sha = cp.snapshotSha ? `  ${C.dim}${cp.snapshotSha.slice(0, 7)}${C.reset}` : '';
             const session = cp.sessionId && cp.sessionId !== currentSession ? `  ${C.dim}(${cp.sessionId})${C.reset}` : '';
@@ -856,6 +856,20 @@ export class REPL {
           });
           target = store.get(answer.trim());
           if (!target) { console.error(`${C.dim}Cancelled.${C.reset}\n`); break; }
+        }
+
+        if (target.snapshotSha) {
+          try {
+            const stat = await store.getShadow().diffStatFrom(target.snapshotSha);
+            if (stat.trim()) {
+              console.error(`\n${C.bold}Changes since checkpoint:${C.reset}`);
+              console.error(`${stat.trim()}\n`);
+            } else {
+              console.error(`\n${C.dim}No code changes since checkpoint.${C.reset}\n`);
+            }
+          } catch {
+            console.error(`\n${C.dim}Could not compute checkpoint diff preview.${C.reset}\n`);
+          }
         }
 
         // Ask restore mode

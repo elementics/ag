@@ -145,7 +145,10 @@ function summarizeFileResult(result: string, args?: Record<string, unknown>): st
   const path = args?.path as string | undefined;
 
   if (action === 'write' || action === 'edit') {
-    return path ? `Wrote/edited ${path}` : 'File written';
+    const preview = result.split('\n').slice(0, 8).join('\n');
+    return path
+      ? truncLine(`Wrote/edited ${path}\n${preview}`, 600)
+      : truncLine(`File written\n${preview}`, 600);
   }
 
   // action=read or default
@@ -162,12 +165,15 @@ function summarizeBashResult(result: string): string {
   const lines = result.split('\n').filter(l => l.trim());
   if (lines.length === 0) return '(empty output)';
 
-  // Check for exit code pattern at the end
+  // Check for exit code pattern at either edge. bash returns failures as "EXIT N\n..."
+  const firstLine = lines[0];
   const lastLine = lines[lines.length - 1];
-  const exitMatch = lastLine.match(/^EXIT (\d+)/);
+  const exitMatch = firstLine.match(/^EXIT (\d+)/) ?? lastLine.match(/^EXIT (\d+)/);
   const exitSuffix = exitMatch ? ` [exit ${exitMatch[1]}]` : '';
 
-  const contentLines = exitMatch ? lines.slice(0, -1) : lines;
+  const contentLines = firstLine.match(/^EXIT \d+/) ? lines.slice(1)
+    : lastLine.match(/^EXIT \d+/) ? lines.slice(0, -1)
+    : lines;
   if (contentLines.length === 0) return `(no output)${exitSuffix}`;
   if (contentLines.length <= 4) return truncLine(contentLines.join('\n'), 300) + exitSuffix;
 

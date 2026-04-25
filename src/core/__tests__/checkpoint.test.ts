@@ -167,7 +167,7 @@ describe('CheckpointStore - clear', () => {
     expect(store.list()).toEqual([]);
     expect(existsSync(join(projectDir, 'checkpoints'))).toBe(false);
     // Shadow repo should be reinitialized (exists again)
-    expect(existsSync(join(projectDir, 'shadow-git', 'HEAD'))).toBe(true);
+    expect(existsSync(join(projectDir, 'shadow', 'HEAD'))).toBe(true);
   });
 
   it('handles missing directory gracefully', async () => {

@@ -1,11 +1,11 @@
 /**
  * Checkpoint store — snapshot conversation + file state for rewind.
- * Uses a shadow git repo to capture the full working tree at each checkpoint.
+ * Uses a shadow repo to capture the full working tree at each checkpoint.
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, rmdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { ShadowGit } from './shadow-git.js';
+import { Shadow } from './shadow.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -45,35 +45,36 @@ function acquireLock(lockDir: string): void {
 // ── CheckpointStore ────────────────────────────────────────────────────────
 
 const MAX_CHECKPOINTS = 20;
+const SHADOW_DIR = 'shadow';
 
 export class CheckpointStore {
   private checkpoints: Checkpoint[] = [];
   private nextId = 1;
   private readonly checkpointsDir: string;
   private readonly indexPath: string;
-  private shadowGit: ShadowGit;
+  private shadow: Shadow;
 
   /** Check if git is available (required for checkpoints). */
   static isAvailable(): Promise<boolean> {
-    return ShadowGit.isAvailable();
+    return Shadow.isAvailable();
   }
 
   constructor(private projectDir: string, private workTree: string) {
     this.checkpointsDir = join(projectDir, 'checkpoints');
     this.indexPath = join(this.checkpointsDir, 'index.json');
-    this.shadowGit = new ShadowGit(join(projectDir, 'shadow-git'), workTree);
+    this.shadow = new Shadow(join(projectDir, SHADOW_DIR), workTree);
     this.load();
   }
 
-  /** Initialize the shadow git repo. Must be called before create/restore. */
+  /** Initialize the shadow repo. Must be called before create/restore. */
   async init(): Promise<void> {
-    await this.shadowGit.init();
+    await this.shadow.init();
   }
 
   /** Create a new checkpoint, snapshotting the current working tree. */
   async create(messageIndex: number, turnNumber: number, label?: string, sessionId?: string): Promise<Checkpoint> {
     const id = String(this.nextId++);
-    const snapshotSha = await this.shadowGit.snapshot(`checkpoint ${id}: ${label || `turn ${turnNumber}`}`);
+    const snapshotSha = await this.shadow.snapshot(`checkpoint ${id}: ${label || `turn ${turnNumber}`}`);
 
     const checkpoint: Checkpoint = {
       id,
@@ -99,7 +100,7 @@ export class CheckpointStore {
   async restoreFiles(checkpointId: string): Promise<void> {
     const checkpoint = this.checkpoints.find(cp => cp.id === checkpointId);
     if (!checkpoint?.snapshotSha) return;
-    await this.shadowGit.restore(checkpoint.snapshotSha);
+    await this.shadow.restore(checkpoint.snapshotSha);
   }
 
   /** List all checkpoints, oldest first. */
@@ -127,23 +128,23 @@ export class CheckpointStore {
     this.save();
   }
 
-  /** Remove all checkpoint data and reinitialize the shadow git repo. */
+  /** Remove all checkpoint data and reinitialize the shadow repo. */
   async clear(): Promise<void> {
     if (existsSync(this.checkpointsDir)) {
       rmSync(this.checkpointsDir, { recursive: true });
     }
-    const shadowDir = join(this.projectDir, 'shadow-git');
+    const shadowDir = join(this.projectDir, 'shadow');
     if (existsSync(shadowDir)) {
       rmSync(shadowDir, { recursive: true });
     }
     this.checkpoints = [];
     this.nextId = 1;
-    await this.shadowGit.init();
+    await this.shadow.init();
   }
 
-  /** Get the underlying ShadowGit instance (for diff, etc). */
-  getShadowGit(): ShadowGit {
-    return this.shadowGit;
+  /** Get the underlying Shadow instance (for diff, etc). */
+  getShadow(): Shadow {
+    return this.shadow;
   }
 
   // ── Persistence ──────────────────────────────────────────────────────────
@@ -172,7 +173,7 @@ export class CheckpointStore {
   private pruneOldest(count: number): void {
     this.checkpoints.splice(0, count);
     this.save();
-    // Let shadow git gc handle object cleanup
-    this.shadowGit.prune(MAX_CHECKPOINTS).catch(() => { /* non-fatal */ });
+    // Let git gc handle shadow object cleanup.
+    this.shadow.prune(MAX_CHECKPOINTS).catch(() => { /* non-fatal */ });
   }
 }

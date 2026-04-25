@@ -82,6 +82,12 @@ export interface Tool {
   execute: (args: any) => Promise<string> | string;
 }
 
+export interface ToolExecutionResult {
+  content: string;
+  terminateTurn?: boolean;
+  terminationReason?: string;
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;

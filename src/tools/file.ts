@@ -144,6 +144,17 @@ function validatePath(cwd: string, path: string): { resolved: string; error?: st
   return { resolved };
 }
 
+function formatLineSnippet(content: string, startLine: number, endLine: number): string {
+  const lines = content.split('\n');
+  const start = Math.max(1, startLine);
+  const end = Math.min(lines.length, endLine);
+  const snippet = lines
+    .slice(start - 1, end)
+    .map((line, idx) => `${String(start + idx).padStart(6)}\t${line}`)
+    .join('\n');
+  return snippet.length <= 8192 ? snippet : `${snippet.slice(0, 8192)}\n... [snippet truncated]`;
+}
+
 function doWrite(cwd: string, path: string, content: string): string {
   const { resolved, error } = validatePath(cwd, path);
   if (error) return error;
@@ -153,7 +164,8 @@ function doWrite(cwd: string, path: string, content: string): string {
     writeFileSync(resolved, content);
     const lines = content.split('\n').length;
     const bytes = Buffer.byteLength(content);
-    return `Wrote ${path} (${lines} lines, ${formatSize(bytes)})`;
+    const preview = formatLineSnippet(content, 1, Math.min(lines, 80));
+    return `Wrote ${path} (${lines} lines, ${formatSize(bytes)})\nCurrent content preview:\n${preview}`;
   } catch (e: unknown) {
     return `Error: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -162,6 +174,7 @@ function doWrite(cwd: string, path: string, content: string): string {
 function doEdit(cwd: string, path: string, oldString: string, newString: string): string {
   const { resolved, error } = validatePath(cwd, path);
   if (error) return error;
+  if (oldString === newString) return `Error: no-op edit for ${path}; old_string and new_string are identical.`;
 
   let content: string;
   try { content = readFileSync(resolved, 'utf-8'); } catch (e: unknown) {
@@ -176,9 +189,15 @@ function doEdit(cwd: string, path: string, oldString: string, newString: string)
   if (occurrences === 0) return `Error: old_string not found in ${path}. Read the file first to verify exact content.`;
   if (occurrences > 1) return `Error: old_string matches ${occurrences} times in ${path}. Provide more surrounding context to make it unique.`;
 
+  const before = content.slice(0, content.indexOf(oldString));
+  const startLine = before.split('\n').length;
+  const newLineCount = newString.split('\n').length;
   const updated = content.replace(oldString, newString);
+  if (updated === content) return `Error: no-op edit for ${path}; replacement did not change file content.`;
   writeFileSync(resolved, updated);
-  return `Edited ${path} — replaced ${oldString.split('\n').length} line(s)`;
+  const endLine = startLine + newLineCount - 1;
+  const snippet = formatLineSnippet(updated, startLine - 3, endLine + 3);
+  return `Edited ${path} — replaced ${oldString.split('\n').length} line(s)\nChanged range: lines ${startLine}-${endLine}\nCurrent content around change:\n${snippet}`;
 }
 
 export function fileTool(cwd: string): Tool {
