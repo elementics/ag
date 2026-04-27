@@ -202,6 +202,14 @@ function formatCost(cost: number): string {
   return cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2);
 }
 
+/** Returns the color key for a current-context token count. Exported for testing. */
+export function contextTokenColorKey(tokens: number): 'red' | 'orange' | 'yellow' | 'green' {
+  if (tokens >= 90_000) return 'red';
+  if (tokens >= 50_000) return 'orange';
+  if (tokens >= 30_000) return 'yellow';
+  return 'green';
+}
+
 /** Render the status footer for the reserved bottom row. */
 export function renderFooter(data: FooterData, cols: number): string {
   const BAR_WIDTH = 8;
@@ -213,10 +221,13 @@ export function renderFooter(data: FooterData, cols: number): string {
     ? C.green
     : ('NO_COLOR' in process.env || !process.stderr.isTTY ? '' : '\x1b[38;5;208m');
 
+  const ctxTokens = data.currentTokens;
+  const ctxColor = C[contextTokenColorKey(ctxTokens)];
+
   const parts: string[] = [];
   parts.push(`${modeColor}${data.mode}${C.reset}`);
   parts.push(data.model);
-  parts.push(`${bar} ${barColor}${pct}%${C.reset}`);
+  parts.push(`${ctxColor}${formatTokensShort(ctxTokens)}${C.reset} ${bar} ${barColor}${pct}%${C.reset}`);
   parts.push(`↑${formatTokensShort(data.inputTokens)} ↓${formatTokensShort(data.outputTokens)}`);
   if (data.cost != null && data.cost > 0) {
     parts.push(`$${formatCost(data.cost)}`);

@@ -187,6 +187,7 @@ All action-based tools follow the pattern: `tool(action, ...params)`.
 | `history` | `search`, `recent` | Search or browse conversation history |
 | `agent` | — | Spawn sub-agents for parallel work |
 | `skill` | — | Activate a skill by name |
+| `self` | `list`, `create`, `edit`, `remove`, `disable`, `enable` | Manage custom tools, skills, and extensions |
 
 ### Background Processes
 
@@ -215,6 +216,29 @@ Sub-agents get project memory, plan, skills, tools, and extensions but start wit
 Multiple `agent()` calls in the same turn run in parallel. Use `model` to route cheap tasks to faster/cheaper models. Sub-agents run silently — only the parent shows `[agent]` start/result lines.
 
 Sub-agents cannot spawn sub-sub-agents (depth limit = 1). Extensions loaded on sub-agents can check `agent.isSilent()` to avoid output.
+
+### Self Tool
+
+The `self` tool manages Ag's own custom tools, skills, and extensions. Built-ins are read-only.
+
+| Action | Description |
+|--------|-------------|
+| `list` | Show all built-in and custom tools, skills, or extensions with status |
+| `create` | Scaffold a new item from the `ag.md` template |
+| `edit` | Return the file path so Claude can edit it |
+| `remove` | Delete a custom item |
+| `disable` | Rename to `*.disabled` (keeps file, disables loading) |
+| `enable` | Restore from `*.disabled` |
+
+```
+self(action="list")
+self(action="create", type="tool", name="notify", description="Send a desktop notification")
+self(action="create", type="skill", name="code-review", scope="global")
+self(action="disable", type="tool", name="notify")
+self(action="remove", type="tool", name="notify")
+```
+
+Templates are read from `~/.ag/ag.md`. Users can edit that file freely to customize scaffolding.
 
 ## Custom Tools
 

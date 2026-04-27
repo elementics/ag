@@ -139,3 +139,36 @@ describe('bash tool - background processes', () => {
     expect(result).toContain('exited');
   }, 5000);
 });
+
+describe('bash tool - foreground abort via AbortSignal', () => {
+  it('kills a long-running foreground command when signal is aborted', async () => {
+    const controller = new AbortController();
+    const execPromise = bash.execute({ command: 'sleep 60' }, controller.signal);
+    setTimeout(() => controller.abort(), 100);
+
+    const start = Date.now();
+    const result = await execPromise;
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(2000);
+    expect(result).toBe('EXIT 130\n[interrupted by user]');
+  }, 5000);
+
+  it('resolves immediately if signal is already aborted before execute', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const start = Date.now();
+    const result = await bash.execute({ command: 'sleep 60' }, controller.signal);
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(1000);
+    expect(result).toBe('EXIT 130\n[interrupted by user]');
+  }, 3000);
+
+  it('completes normally when signal is present but never aborted', async () => {
+    const controller = new AbortController();
+    const result = await bash.execute({ command: 'echo signal-ok' }, controller.signal);
+    expect(result).toBe('signal-ok');
+  });
+});

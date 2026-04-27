@@ -1,4 +1,6 @@
 import { createInterface, Interface, emitKeypressEvents } from 'node:readline';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { Agent } from '../core/agent.js';
 import { promptInput, setBeforePromptHook } from '../core/utils.js';
 import { loadConfig, saveConfig, configPath, PersistentConfig, CONFIG_KEYS, CONFIG_KEY_ALIASES } from '../core/config.js';
@@ -523,11 +525,7 @@ export class REPL {
               case 'tool_end': {
                 clearSpinner();
                 hadTools = true;
-                let endLabel = chunk.toolName || '';
-                const activeSkills = this.agent.getActiveSkillNames();
-                if (endLabel === 'bash' && activeSkills.length > 0) {
-                  endLabel = `${endLabel} via ${activeSkills[activeSkills.length - 1]}`;
-                }
+                const endLabel = chunk.toolName || '';
                 const icon = chunk.success ? `${C.green}✓` : `${C.red}✗`;
                 const preview = (chunk.content || '').slice(0, 150).split('\n')[0];
                 const refSuffix = chunk.resultRefId != null ? ` ${C.cyan}[result #${chunk.resultRefId}]${C.reset}` : '';
@@ -718,6 +716,9 @@ export class REPL {
         const scope = args[0]?.toLowerCase() || 'session';
         if (scope === 'session') {
           this.agent.clearSession();
+          const breakdown = this.agent.getContextBreakdown();
+          const totalChars = breakdown.reduce((sum, p) => sum + p.chars, 0);
+          this.agent.getContextTracker().estimateFromChars(totalChars);
           console.error(`${C.yellow}Session cleared. Memory, plans, tasks, history, checkpoints, content, and cached results were kept.${C.reset}\n`);
         } else if (scope === 'project') {
           await this.agent.clearProject();
@@ -822,7 +823,11 @@ export class REPL {
           list.forEach(cp => {
             const ts = formatCheckpointTime(cp.timestamp);
             const sha = cp.snapshotSha ? `  ${C.dim}${cp.snapshotSha.slice(0, 7)}${C.reset}` : '';
-            const session = cp.sessionId && cp.sessionId !== currentSession ? `  ${C.dim}(${cp.sessionId})${C.reset}` : '';
+            const session = cp.sessionId
+              ? cp.sessionId !== currentSession
+                ? `  ${C.dim}(${cp.sessionId})${C.reset}`
+                : `  ${C.dim}${cp.sessionId}${C.reset}`
+              : '';
             console.error(`  ${C.cyan}#${cp.id}${C.reset} ${cp.label || `turn ${cp.turnNumber}`}  ${C.dim}${ts}${C.reset}${sha}${session}`);
           });
           console.error('');
@@ -847,7 +852,11 @@ export class REPL {
           list.slice().reverse().forEach(cp => {
             const ts = formatCheckpointTime(cp.timestamp);
             const sha = cp.snapshotSha ? `  ${C.dim}${cp.snapshotSha.slice(0, 7)}${C.reset}` : '';
-            const session = cp.sessionId && cp.sessionId !== currentSession ? `  ${C.dim}(${cp.sessionId})${C.reset}` : '';
+            const session = cp.sessionId
+              ? cp.sessionId !== currentSession
+                ? `  ${C.dim}(${cp.sessionId})${C.reset}`
+                : `  ${C.dim}${cp.sessionId}${C.reset}`
+              : '';
             console.error(`  ${C.cyan}#${cp.id}${C.reset} ${cp.label || `turn ${cp.turnNumber}`}  ${C.dim}${ts}${C.reset}${sha}${session}`);
           });
           console.error('');
@@ -1038,7 +1047,8 @@ export class REPL {
         console.error(`${C.bold}Tools (${tools.length}):${C.reset}`);
         for (const t of tools) {
           const prefix = t.isBuiltin ? ' ' : `${C.green}+${C.reset}`;
-          console.error(`  ${prefix} ${C.cyan}${t.name}${C.reset}  ${C.dim}${t.description.slice(0, 60)}${t.description.length > 60 ? '...' : ''}${C.reset}`);
+          const scopeTag = (!t.isBuiltin && t.scope === 'project') ? ` ${C.yellow}[project]${C.reset}` : '';
+          console.error(`  ${prefix} ${C.cyan}${t.name}${C.reset}${scopeTag}  ${C.dim}${t.description.slice(0, 60)}${t.description.length > 60 ? '...' : ''}${C.reset}`);
         }
         console.error('');
         break;
@@ -1079,7 +1089,7 @@ export class REPL {
             console.error(`${C.red}Error: ${msg}${C.reset}\n`);
           }
         } else if (subCmd === 'remove' && args[1]) {
-          const msg = removeSkill(args[1]);
+          const msg = removeSkill(args[1], this.agent.getCwd());
           this.agent.refreshSkills();
           console.error(`${C.yellow}${msg}${C.reset}\n`);
         } else if (!subCmd) {
@@ -1089,10 +1099,13 @@ export class REPL {
             console.error(`${C.dim}No skills installed. Use /skill search <query> to browse skills.sh${C.reset}\n`);
             break;
           }
+          const globalSkillsDir = join(homedir(), '.ag', 'skills');
           console.error(`${C.bold}Skills (${skills.length}):${C.reset}`);
           for (const s of skills) {
+            const isProject = !s.dir.startsWith(globalSkillsDir);
+            const scopeTag = isProject ? ` ${C.yellow}[project]${C.reset}` : '';
             const flags = [s.always && 'always-on', s.hasTools && 'has tools'].filter(Boolean).join(', ');
-            console.error(`  ${C.cyan}${s.name}${C.reset}  ${C.dim}${s.description.slice(0, 60)}${flags ? ` (${flags})` : ''}${C.reset}`);
+            console.error(`  ${C.cyan}${s.name}${C.reset}${scopeTag}  ${C.dim}${s.description.slice(0, 60)}${flags ? ` (${flags})` : ''}${C.reset}`);
           }
           console.error('');
         } else {
@@ -1280,6 +1293,7 @@ export class REPL {
       contextPct: tracker.getContextPct(),
       contextUsed: tracker.getUsedTokens() ?? 0,
       contextMax: tracker.getContextLength() ?? 0,
+      currentTokens: tracker.getCurrentTokens(),
       inputTokens: tracker.getInputTokens(),
       outputTokens: tracker.getOutputTokens(),
       cost: tracker.getSessionCostPublic(),

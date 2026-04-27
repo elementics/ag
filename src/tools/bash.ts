@@ -139,7 +139,7 @@ export function cleanupBackgroundProcesses(): void {
   backgrounds.clear();
 }
 
-function runForeground(command: string, cwd: string): Promise<string> {
+function runForeground(command: string, cwd: string, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve) => {
     const child = spawn('sh', ['-c', command], {
       cwd,
@@ -150,6 +150,13 @@ function runForeground(command: string, cwd: string): Promise<string> {
     let stdout = '';
     let stderr = '';
     let stdoutOverflow = false;
+    let settled = false;
+
+    function finish(result: string) {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    }
 
     child.stdout.on('data', (chunk: Buffer) => {
       if (stdout.length < MAX_BUFFER) {
@@ -166,21 +173,47 @@ function runForeground(command: string, cwd: string): Promise<string> {
     });
 
     child.on('close', (code) => {
+      if (settled) return;
       let result = stdout.trim();
       if (stdoutOverflow) {
         result += '\n... (output truncated at 1MB)';
       }
       if (code === 0) {
-        resolve(result);
+        finish(result);
       } else {
         const status = code ?? 1;
-        resolve(`EXIT ${status}\n${(stdout + stderr).trim()}`);
+        finish(`EXIT ${status}\n${(stdout + stderr).trim()}`);
       }
     });
 
     child.on('error', (err) => {
-      resolve(`EXIT 1\n${err.message}`);
+      finish(`EXIT 1\n${err.message}`);
     });
+
+    if (signal) {
+      const onAbort = () => {
+        signal.removeEventListener('abort', onAbort);
+        try { child.kill('SIGTERM'); } catch { /* already gone */ }
+        const killTimer = setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        }, 3000);
+        child.once('close', () => {
+          clearTimeout(killTimer);
+          finish('EXIT 130\n[interrupted by user]');
+        });
+        if (child.exitCode !== null || child.killed) {
+          clearTimeout(killTimer);
+          finish('EXIT 130\n[interrupted by user]');
+        }
+      };
+
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener('abort', onAbort);
+        child.once('close', () => signal.removeEventListener('abort', onAbort));
+      }
+    }
   });
 }
 
@@ -214,7 +247,7 @@ export function bashToolFactory(cwd: string): Tool {
         required: []
       }
     },
-    execute: async ({ command, background, action, pid }: { command?: string; background?: boolean; action?: string; pid?: number }): Promise<string> => {
+    execute: async ({ command, background, action, pid }: { command?: string; background?: boolean; action?: string; pid?: number }, signal?: AbortSignal): Promise<string> => {
       // Background process management
       if (action === 'output' && pid != null) return getOutput(pid);
       if (action === 'kill' && pid != null) return killProcess(pid);
@@ -226,7 +259,7 @@ export function bashToolFactory(cwd: string): Tool {
       if (blocked) return blocked;
 
       if (background) return startBackground(command, cwd);
-      return runForeground(command, cwd);
+      return runForeground(command, cwd, signal);
     }
   };
 }

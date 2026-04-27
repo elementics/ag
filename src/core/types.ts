@@ -79,7 +79,8 @@ export interface Tool {
   /** Mark tool as plan-mode safe. `true` = all actions; `string[]` = only listed action values. */
   readOnly?: true | string[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tools destructure their own typed params from parsed JSON
-  execute: (args: any) => Promise<string> | string;
+  execute: (args: any, signal?: AbortSignal) => Promise<string> | string;
+  _scope?: 'global' | 'project';
 }
 
 export interface ToolExecutionResult {

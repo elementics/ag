@@ -62,6 +62,7 @@ const READ_ONLY_CALLS: Record<string, Set<string> | true> = {
   git: new Set(['status']),                             // only status is safe
   web: true,                                           // built-in web operations are read-only
   task: true,                                          // all task actions are safe (internal state)
+  self: true,                                          // managing ag's own tools/skills/extensions is safe
   agent: true,                                         // sub-agent spawning is safe (internal orchestration)
   content: true,                                        // all content actions are read-only
   result: true,                                         // all result actions are read-only

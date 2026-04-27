@@ -59,6 +59,8 @@ export function getAllResultRefs(): ResultRef[] {
   return [...resultRefs.values()];
 }
 
+export function getNextResultId(): number { return nextResultId; }
+
 // ── Locking (same pattern as withTasks in memory.ts) ───────────────────────
 
 const LOCK_TIMEOUT = 5000;

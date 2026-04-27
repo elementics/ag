@@ -90,6 +90,10 @@ export class ContextTracker {
     return this.lastUsage?.prompt_tokens ?? null;
   }
 
+  getCurrentTokens(): number {
+    return this.lastUsage?.prompt_tokens ?? this.estimatedTokens;
+  }
+
   getInputTokens(): number { return this.cumPromptTokens; }
   getOutputTokens(): number { return this.cumCompletionTokens; }
 

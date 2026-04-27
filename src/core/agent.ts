@@ -16,6 +16,7 @@ import { fileTool } from '../tools/file.js';
 import { contentTool } from '../tools/content.js';
 import { resultTool } from '../tools/result.js';
 import { historyTool } from '../tools/history.js';
+import { selfTool } from '../tools/self.js';
 import { consumeRequestedRefs, resolveContent, getContentRef, restoreContentIndex, pruneContentCache, estimateMessageContentChars } from './content.js';
 import { cacheResult, RESULT_REF_THRESHOLD, consumeRequestedResults, resolveResult, getResultRef, restoreResultIndex, saveResultIndex } from './results.js';
 import { discoverSkills, buildSkillCatalog, getAlwaysOnContent, loadSkillTools, type SkillMeta } from './skills.js';
@@ -282,6 +283,7 @@ Before asking the user, re-running a broad search, or guessing, check context in
     this.addTool(contentTool(this.cwd));
     this.addTool(resultTool(this.cwd));
     this.addTool(historyTool(this.cwd));
+    this.addTool(selfTool(this.cwd));
     if (!config.noSubAgents) this.addTool(agentTool(this));
     if (this.allSkills.length > 0) this.addTool(skillTool(this));
     this.builtinToolNames = new Set(this.tools.keys());
@@ -958,7 +960,16 @@ Before asking the user, re-running a broad search, or guessing, check context in
 
         try {
           this.traceWriter?.write('tool_call', { turnNumber: this.currentTurn, iteration: i, toolName: call.function.name, toolCallId: call.id, args });
-          const rawExecution = normalizeToolExecutionResult(await tool.execute(args));
+          const toolPromise = Promise.resolve(tool.execute(args, signal));
+          const abortRace = signal
+            ? new Promise<string>(resolve => {
+                if (signal.aborted) resolve('[cancelled by user]');
+                else signal.addEventListener('abort', () => resolve('[cancelled by user]'), { once: true });
+              })
+            : null;
+          const rawExecution = normalizeToolExecutionResult(
+            abortRace ? await Promise.race([toolPromise, abortRace]) : await toolPromise
+          );
           const rawResult = rawExecution.content;
           const previewResult = truncateToolResult(rawResult);
           let result = previewResult;
@@ -1185,11 +1196,12 @@ Before asking the user, re-running a broad search, or guessing, check context in
     return parts;
   }
 
-  getTools(): Array<{ name: string; description: string; isBuiltin: boolean }> {
+  getTools(): Array<{ name: string; description: string; isBuiltin: boolean; scope?: 'global' | 'project' }> {
     return Array.from(this.tools.values()).map(t => ({
       name: t.function.name,
       description: t.function.description,
       isBuiltin: this.builtinToolNames.has(t.function.name),
+      scope: t._scope,
     }));
   }
   getToolFailures(): Array<{ file: string; name?: string; reason: string }> { return this.toolFailures; }
@@ -1234,14 +1246,6 @@ Before asking the user, re-running a broad search, or guessing, check context in
   }
 
   getSkills(): SkillMeta[] { return this.allSkills; }
-  getActiveSkillNames(): string[] {
-    const names: string[] = [];
-    for (const c of this.activeSkillContent) {
-      const match = c.match(/name="([^"]+)"/);
-      if (match) names.push(match[1]);
-    }
-    return names;
-  }
   refreshSkills(): void { this.allSkills = discoverSkills(this.cwd); this.refreshCache(); }
 
   getStats(): MemoryStats { return getStats(this.cwd); }

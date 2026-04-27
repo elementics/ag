@@ -18,7 +18,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/assets && cp src/assets/* dist/assets/",
     "dev": "tsc --watch",
     "start": "npm run build && node dist/cli.js",
     "test": "vitest run",

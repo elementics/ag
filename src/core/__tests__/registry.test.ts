@@ -36,12 +36,25 @@ describe('installSkill', () => {
     await expect(installSkill('invalid-source')).rejects.toThrow('Format');
   });
 
-  it('throws when skill directory is not found', async () => {
+  it('throws a clean actionable message when skill is not found in repo', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
     try {
       await expect(installSkill('nonexistent-owner/nonexistent-repo@nonexistent-skill'))
-        .rejects.toThrow('Could not find skill directory');
+        .rejects.toThrow('registry entry may be outdated');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('includes skill name and install hint in the not-found error', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+    try {
+      await expect(installSkill('myowner/myrepo@my-skill'))
+        .rejects.toThrow('Skill "my-skill" was not found in myowner/myrepo');
+      await expect(installSkill('myowner/myrepo@my-skill'))
+        .rejects.toThrow('/skill add <owner>/<repo>@my-skill');
     } finally {
       globalThis.fetch = originalFetch;
     }

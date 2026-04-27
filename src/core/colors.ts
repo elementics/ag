@@ -1,7 +1,7 @@
 const nc = 'NO_COLOR' in process.env || !process.stderr.isTTY;
 export const C = nc
-  ? { reset: '', dim: '', cyan: '', green: '', red: '', bold: '', yellow: '' }
-  : { reset: '\x1b[0m', dim: '\x1b[2m', cyan: '\x1b[36m', green: '\x1b[32m', red: '\x1b[31m', bold: '\x1b[1m', yellow: '\x1b[33m' };
+  ? { reset: '', dim: '', cyan: '', green: '', red: '', bold: '', yellow: '', orange: '' }
+  : { reset: '\x1b[0m', dim: '\x1b[2m', cyan: '\x1b[36m', green: '\x1b[32m', red: '\x1b[31m', bold: '\x1b[1m', yellow: '\x1b[33m', orange: '\x1b[38;5;208m' };
 
 /** Render basic markdown as ANSI-styled text */
 export function renderMarkdown(text: string): string {

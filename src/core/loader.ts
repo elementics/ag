@@ -52,8 +52,8 @@ export async function loadUserTools(cwd: string): Promise<LoadUserToolsResult> {
 
   // Local tools override global if same name
   const byName = new Map<string, Tool>();
-  for (const t of global.tools) byName.set(t.function.name, t);
-  for (const t of local.tools) byName.set(t.function.name, t);
+  for (const t of global.tools) { t._scope = 'global'; byName.set(t.function.name, t); }
+  for (const t of local.tools)  { t._scope = 'project'; byName.set(t.function.name, t); }
   return {
     tools: Array.from(byName.values()),
     failures: [...global.failures, ...local.failures],

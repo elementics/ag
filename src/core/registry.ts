@@ -94,7 +94,15 @@ export async function installSkill(source: string): Promise<string> {
   const headers = githubHeaders();
 
   // Phase 1: Find the skill directory in the repo tree
-  const { branch, dirPath, files } = await findSkillInTree(repo, skillName, headers);
+  let skillLocation: Awaited<ReturnType<typeof findSkillInTree>>;
+  try {
+    skillLocation = await findSkillInTree(repo, skillName, headers);
+  } catch {
+    throw new Error(
+      `Skill "${skillName}" was not found in ${repo}. The registry entry may be outdated. To install manually: /skill add <owner>/<repo>@${skillName}`
+    );
+  }
+  const { branch, dirPath, files } = skillLocation;
 
   // Phase 2: Download and save all files
   const skillDir = join(SKILLS_DIR, skillName);
@@ -145,11 +153,20 @@ export async function installSkill(source: string): Promise<string> {
   return message;
 }
 
-export function removeSkill(name: string): string {
-  const skillDir = join(SKILLS_DIR, name);
-  if (!existsSync(skillDir)) return `Skill "${name}" not found.`;
-  rmSync(skillDir, { recursive: true });
-  return `Removed "${name}".`;
+export function removeSkill(name: string, cwd?: string): string {
+  // Check project-local scope first, then global
+  const candidates = [
+    ...(cwd ? [join(cwd, '.ag', 'skills', name)] : []),
+    join(SKILLS_DIR, name),
+  ];
+  for (const skillDir of candidates) {
+    if (existsSync(skillDir)) {
+      rmSync(skillDir, { recursive: true });
+      const scope = skillDir.startsWith(SKILLS_DIR) ? 'global' : 'project';
+      return `Removed "${name}" (${scope}).`;
+    }
+  }
+  return `Skill "${name}" not found.`;
 }
 
 export function formatInstalls(n: number): string {

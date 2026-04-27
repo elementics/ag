@@ -57,6 +57,40 @@ describe('ContextTracker', () => {
     });
   });
 
+  describe('getCurrentTokens', () => {
+    it('returns 0 with no usage or estimate', () => {
+      const t = new ContextTracker('anthropic/claude-sonnet-4.6');
+      expect(t.getCurrentTokens()).toBe(0);
+    });
+
+    it('returns prompt_tokens from lastUsage when available', () => {
+      const t = new ContextTracker('anthropic/claude-sonnet-4.6');
+      t.update({ prompt_tokens: 25000, completion_tokens: 500, total_tokens: 25500 });
+      expect(t.getCurrentTokens()).toBe(25000);
+    });
+
+    it('returns estimatedTokens when no lastUsage', () => {
+      const t = new ContextTracker('anthropic/claude-sonnet-4.6');
+      t.estimateFromChars(18400); // ceil(18400/4) = 4600
+      expect(t.getCurrentTokens()).toBe(4600);
+    });
+
+    it('returns actual tokens after update(), ignoring prior estimate', () => {
+      const t = new ContextTracker('anthropic/claude-sonnet-4.6');
+      t.estimateFromChars(80000); // 20000 estimated
+      t.update({ prompt_tokens: 35000, completion_tokens: 800, total_tokens: 35800 });
+      expect(t.getCurrentTokens()).toBe(35000);
+    });
+
+    it('returns estimate after reset() + estimateFromChars()', () => {
+      const t = new ContextTracker('anthropic/claude-sonnet-4.6');
+      t.update({ prompt_tokens: 100000, completion_tokens: 9000, total_tokens: 109000 });
+      t.reset();
+      t.estimateFromChars(18400); // simulates post-clear seed from breakdown
+      expect(t.getCurrentTokens()).toBe(4600);
+    });
+  });
+
   describe('shouldCompact', () => {
     it('returns false when no usage data', () => {
       const t = new ContextTracker('anthropic/claude-sonnet-4.6');

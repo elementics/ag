@@ -12,6 +12,21 @@ import { needsSetup, runSetupWizard } from './cli/setup.js';
 import { cleanupBackgroundProcesses } from './tools/bash.js';
 import { ingestContent, describeContent } from './core/content.js';
 import type { ContentBlock } from './core/types.js';
+import { existsSync, copyFileSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { AG_DIR } from './core/constants.js';
+
+function ensureAgMd(): void {
+  const dest = join(AG_DIR, 'ag.md');
+  if (!existsSync(dest)) {
+    const src = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'ag.md');
+    if (existsSync(src)) {
+      mkdirSync(AG_DIR, { recursive: true });
+      copyFileSync(src, dest);
+    }
+  }
+}
 
 async function ensureApiKey(cliKey?: string, baseURL?: string): Promise<string> {
   // 1. CLI flag
@@ -41,6 +56,7 @@ async function ensureApiKey(cliKey?: string, baseURL?: string): Promise<string> 
 }
 
 async function main(): Promise<void> {
+  ensureAgMd();
   const { positional, ...options } = parseArgs(process.argv.slice(2));
 
   if (options.help) { showHelp(); process.exit(0); }

@@ -61,6 +61,7 @@ export interface FooterData {
   contextPct: number;
   contextUsed: number;
   contextMax: number;
+  currentTokens: number;
   inputTokens: number;
   outputTokens: number;
   cost: number | null;
